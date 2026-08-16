@@ -97,7 +97,7 @@ int new_xpc_pipe_routine_reply(xpc_object_t reply)
 				proc_get_identifier(audit_token_to_pid(clientToken), client_identifier);
 
 				volatile bool isSafeBundleIdentifier = is_safe_bundle_identifier(bundle);
-				volatile bool isSelfBundleIdentifier = client_identifier[0] && string_has_prefix(bundle, client_identifier);
+				volatile bool isSelfBundleIdentifier = client_identifier[0] && roothide_string_has_prefix(bundle, client_identifier);
 
 				if (error==0 && !isSelfBundleIdentifier && !isSafeBundleIdentifier)
 				{
@@ -203,7 +203,7 @@ void roothide_handle_xpc_msg(xpc_object_t xmsg)
 			volatile char *bundle = NULL;
 			volatile const char *name = xpc_dictionary_get_string(xmsg, "name");
 			if (name) {
-				if (string_has_prefix(name, "UIKitApplication:")) {
+				if (roothide_string_has_prefix(name, "UIKitApplication:")) {
 					bundle = name + sizeof("UIKitApplication:") - 1;
 					char *end = strchr(bundle, '[');
 					if (end) {
@@ -224,7 +224,7 @@ void roothide_handle_xpc_msg(xpc_object_t xmsg)
 			proc_get_identifier(clientPid, client_identifier);
 
 			volatile bool isSafeBundleIdentifier = is_safe_bundle_identifier(bundle);
-			volatile bool isSelfBundleIdentifier = client_identifier[0] && string_has_prefix(bundle, client_identifier);
+			volatile bool isSelfBundleIdentifier = client_identifier[0] && roothide_string_has_prefix(bundle, client_identifier);
 
 			if (name && !isSelfBundleIdentifier && !isSafeBundleIdentifier)
 			{
@@ -250,7 +250,7 @@ void roothide_handle_xpc_msg(xpc_object_t xmsg)
 
 			volatile bool isJailbrokenPath = !path[0] || hasTrollstoreMarker(path) || isSubPathOf(path, JBROOT_PATH("/"));
 			volatile bool isSafeBundleIdentifier = proc_identifier[0] && is_safe_bundle_identifier(proc_identifier);
-			volatile bool isSelfBundleIdentifier = proc_identifier[0] && client_identifier[0] && string_has_prefix(proc_identifier, client_identifier);
+			volatile bool isSelfBundleIdentifier = proc_identifier[0] && client_identifier[0] && roothide_string_has_prefix(proc_identifier, client_identifier);
 
 			if (pid > 0 && pid != clientPid && (isJailbrokenPath || (!isSafeBundleIdentifier && !isSelfBundleIdentifier)))
 			{

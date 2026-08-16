@@ -179,19 +179,19 @@ bool process_force_dyld_patch(const char* path, const char** argv)
 
     if(__builtin_available(iOS 16.0, *))
     {
-        if(string_has_suffix(path, "/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent")) {
+        if(roothide_string_has_suffix(path, "/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent")) {
             return true;
         }
-        else if(string_has_suffix(path, "/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.CaptivePortal.xpc/com.apple.WebKit.WebContent.CaptivePortal")) {
+        else if(roothide_string_has_suffix(path, "/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.CaptivePortal.xpc/com.apple.WebKit.WebContent.CaptivePortal")) {
             return true;
         }
         else if(strcmp(path, "/usr/libexec/xpcproxy")==0)
         {
             if (argv && argv[0] && argv[1]) {
-                if(string_has_prefix(argv[1], "com.apple.WebKit.WebContent")) {
+                if(roothide_string_has_prefix(argv[1], "com.apple.WebKit.WebContent")) {
                     return true;
                 }
-                else if(string_has_prefix(argv[1], "com.apple.WebKit.WebContent.CaptivePortal")) {
+                else if(roothide_string_has_prefix(argv[1], "com.apple.WebKit.WebContent.CaptivePortal")) {
                     return true;
                 }
             }
@@ -237,7 +237,7 @@ int roothide_config_set_spinlock_fix(bool enabled)
     return 0;
 }
 
-bool string_has_prefix(const char *str, const char* prefix)
+bool roothide_string_has_prefix(const char *str, const char* prefix)
 {
 	if (!str || !prefix) {
 		return false;
@@ -253,7 +253,7 @@ bool string_has_prefix(const char *str, const char* prefix)
 	return !strncmp(str, prefix, prefix_len);
 }
 
-bool string_has_suffix(const char* str, const char* suffix)
+bool roothide_string_has_suffix(const char* str, const char* suffix)
 {
 	if (!str || !suffix) {
 		return false;
@@ -346,7 +346,7 @@ bool isSubPathOf(const char* child, const char* parent)
 	if(!realpath(child, real_child)) return false;
 	if(!realpath(parent, real_parent)) return false;
 
-	if(!string_has_prefix(real_child, real_parent))
+	if(!roothide_string_has_prefix(real_child, real_parent))
 		return false;
 
 	return real_child[strlen(real_parent)] == '/';
@@ -932,11 +932,11 @@ bool is_safe_bundle_identifier(const char* identifier)
         return true;
     }
 
-    if(string_has_prefix(identifier, "lockdown.") && strstr(identifier, ".com.apple.")) {
+    if(roothide_string_has_prefix(identifier, "lockdown.") && strstr(identifier, ".com.apple.")) {
         return true;
     }
 
-    if(string_has_prefix(identifier, "com.apple."))
+    if(roothide_string_has_prefix(identifier, "com.apple."))
     {
         if(is_apple_internal_identifier(identifier)) {
             return false;
@@ -976,4 +976,3 @@ int wait_for_exit(pid_t pid)
         }
     }
 }
-

@@ -38,8 +38,8 @@ void commitBlacklistProcessId(pid_t* pidp);
 bool isRemovableBundlePath(const char* path);
 bool isSubPathOf(const char* parent, const char* child);
 
-bool string_has_prefix(const char *str, const char* prefix);
-bool string_has_suffix(const char* str, const char* suffix);
+bool roothide_string_has_prefix(const char *str, const char* prefix);
+bool roothide_string_has_suffix(const char* str, const char* suffix);
 
 bool hasTrollstoreMarker(const char* path);
 bool hasTrollstoreLiteMarker(const char* path);
@@ -90,4 +90,3 @@ bool is_apple_internal_identifier(const char* identifier);
     @"com.opa334.Dopamine.roothide",\
     @"com.opa334.Dopamine-roothide",\
 ]
-
