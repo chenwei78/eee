@@ -97,6 +97,10 @@ jobs:
           set -x
           export BASEDIR="$(pwd)"
           export THEOS="${BASEDIR}/theos"
+          # RootHide hooks use private XPC declarations that newer SDKs mark
+          # as unavailable. Let BaseBin retain its bundled XPC headers.
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          rm -rf "$SDK_PATH/usr/include/xpc" "$SDK_PATH/usr/include/xpc.modulemap"
           gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
 
       - name: Upload Artifact
