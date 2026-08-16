@@ -835,6 +835,13 @@ static NSError *rootHideError(NSInteger code, NSString *message)
             if (r != 0) return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"Installing roothideapp.deb failed: %d", r]);
         }
     }
+
+    // launchdhook uses this marker for the authoritative RootHide status.
+    // The randomized jbroot itself is created much earlier, so its presence
+    // alone must not make a failed bootstrap appear jailbroken.
+    if (![[NSData data] writeToFile:rootHideJbrootPath(@"/.roothide_bootstrap_complete") atomically:YES]) {
+        return rootHideError(BootstrapErrorCodeFailedFinalising, @"Could not write the RootHide bootstrap completion marker");
+    }
     return nil;
 }
 

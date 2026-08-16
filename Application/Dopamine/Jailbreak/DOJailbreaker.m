@@ -725,9 +725,6 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
     
-    // After the launchd hook is initialized, we need to make the app believe the device is jailbroken
-    [[DOEnvironmentManager sharedManager] setJailbroken:YES withVersion:[NSString stringWithContentsOfFile:JBROOT_PATH(@"/basebin/.version") encoding:NSUTF8StringEncoding error:nil]];
-    
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing RootHide") debug:NO];
     int rootHideResult = basebin_generate(false);
     if (rootHideResult != 0) {

@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <unistd.h>
 #include "jbserver_global.h"
 
 #include <libjailbreak/libjailbreak.h>
@@ -75,7 +76,10 @@ static int roothide_trust_library_recurse(const char *libraryPath, const char *c
 
 static int roothide_jailbroken_check(audit_token_t *callerToken, bool* jailbroken)
 {
-	*jailbroken = true;
+	// launchdhook is already active while the first RootHide bootstrap is
+	// being installed.  Only report success after the bootstrapper has
+	// completed all of its setup steps and written its completion marker.
+	*jailbroken = access(JBROOT_PATH("/.roothide_bootstrap_complete"), F_OK) == 0;
 	return 0;
 }
 
