@@ -4,6 +4,7 @@
 #include "info.h"
 #include "jbclient_xpc.h"
 #include "jbroot.h"
+#include "roothider.h"
 #include <spawn.h>
 
 #define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1

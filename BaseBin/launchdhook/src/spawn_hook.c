@@ -57,9 +57,9 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 	// we need to disable the crash reporter during the orig call
 	// otherwise the child process inherits the exception ports
 	// and this would trip jailbreak detections
-	crashreporter_pause();	
+	int key = crashreporter_pause();
 	int r = __posix_spawn_inline(pid, path, desc, argv, envp);
-	crashreporter_resume();
+	crashreporter_resume(key);
 
 	return r;
 }
