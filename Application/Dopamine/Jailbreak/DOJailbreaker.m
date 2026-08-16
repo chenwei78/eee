@@ -405,10 +405,13 @@ static void RootHideAppendTrace(NSString *message)
 
 - (NSError *)loadBasebinTrustcache
 {
+    RootHideAppendTrace(@"phase: loading BaseBin trust cache");
     int r = randomizeAndLoadBasebinTrustcache(JBROOT_PATH("/basebin/"));
     if (r != 0) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: BaseBin trust cache returned %d", r]);
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedBasebinTrustcache userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to load randomized BaseBin trustcache: %d", r]}];
     }
+    RootHideAppendTrace(@"phase complete: BaseBin trust cache");
     return nil;
 }
 
@@ -690,14 +693,26 @@ void *boomerang_server(struct boomerang_info *info)
     
     *errOut = [[DOEnvironmentManager sharedManager] prepareBootstrap];
     if (*errOut) return;
-    setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/rootfs/sbin:/rootfs/bin:/rootfs/usr/sbin:/rootfs/usr/bin", 1);
-    setenv("TERM", "xterm-256color", 1);
 
-    *errOut = [[DOEnvironmentManager sharedManager] updateBootLogo];
+    [[DOUIManager sharedInstance] sendLog:@"Preparing persistent RootHide diagnostic trace" debug:NO];
+    *errOut = [self prepareRootHideLaunchdTrace];
     if (*errOut) {
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: RootHide bootstrap preparation");
+
+    setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/rootfs/sbin:/rootfs/bin:/rootfs/usr/sbin:/rootfs/usr/bin", 1);
+    setenv("TERM", "xterm-256color", 1);
+
+    RootHideAppendTrace(@"phase: updating boot logo");
+    *errOut = [[DOEnvironmentManager sharedManager] updateBootLogo];
+    if (*errOut) {
+        RootHideAppendTrace(@"FAILURE: boot logo update failed");
+        [self cleanUpPostExploitation];
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: boot logo update");
     
     if (!tweaksEnabled) {
         printf("Creating safe mode marker file since tweaks were disabled in settings\n");
@@ -706,13 +721,6 @@ void *boomerang_server(struct boomerang_info *info)
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Loading BaseBin TrustCache") debug:NO];
     *errOut = [self loadBasebinTrustcache];
-    if (*errOut) {
-        [self cleanUpPostExploitation];
-        return;
-    }
-
-    [[DOUIManager sharedInstance] sendLog:@"Preparing persistent RootHide diagnostic trace" debug:NO];
-    *errOut = [self prepareRootHideLaunchdTrace];
     if (*errOut) {
         [self cleanUpPostExploitation];
         return;
