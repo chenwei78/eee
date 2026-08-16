@@ -1,0 +1,68 @@
+== Dopamine RootHide Linux build ==
+root:  /media/sf_1223/Dopamine-3.x-roothide
+THEOS: /opt/theos
+make:  /usr/bin/make
+ldid:  missing
+xcrun: missing
+xcodebuild: missing
+
+make[1]: Entering directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin'
+make[1]: xcrun: No such file or directory
+rm -rf .build
+rm -rf .include
+mkdir -p .build
+cp -r _external/basebin/* .build
+mkdir -p .include
+cp -r _external/include/* .include
+cp _external/basebin/.version .build
+make -C opainject FINALPACKAGE=1
+make -C bootstrapper
+make[2]: Entering directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/opainject'
+make[2]: Entering directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/ChOma'
+make[2]: Entering directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/MachOMerger'
+make[2]: xcrun: No such file or directory
+make[2]: xcrun: No such file or directory
+Building MachOMerger
+swift build --triple arm64-apple-ios14.0 --sdk "" -c debug -Xcc "-DIOS_BUILD" -Xcc -Wno-incompatible-sysroot -Xswiftc -sdk -Xswiftc "" -Xswiftc -target -Xswiftc arm64-apple-ios14.0 -Xswiftc -O -Xswiftc -framework -Xswiftc IOKit -Xswiftc -framework -Xswiftc CoreServices -Xswiftc -D__DARWIN_OPAQUE_ARM_THREAD_STATE64
+/bin/sh: 1: swift: not found
+make[2]: *** [Makefile:30: .build/debug/MachOMerger] Error 127
+make[2]: Leaving directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/MachOMerger'
+make[1]: *** [Makefile:28: MachOMerger] Error 2
+make[1]: *** Waiting for unfinished jobs....
+make[2]: Entering directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/bootstrapper'
+make[2]: xcrun: No such file or directory
+clang -framework Foundation -framework CoreServices -framework Security -I../.include -I./src -isysroot  -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -fobjc-arc -Wno-nullability-completeness-on-arrays -O2  -o bootstrapper src/main.m
+make[2]: pkg-config: No such file or directory
+make[2]: xcrun: No such file or directory
+make[2]: pkg-config: No such file or directory
+make[2]: xcrun: No such file or directory
+make[2]: pkg-config: No such file or directory
+make[2]: xcrun: No such file or directory
+clang -Wall -Werror  -fPIC -Wno-pointer-to-int-cast -Wno-unused-command-line-argument -Wno-deprecated-declarations -framework CoreFoundation -arch arm64 -arch arm64e -isysroot  -miphoneos-version-min=11.0 -DDISABLE_SIGNING=1  -c src/arm64.c -o build/ios/arm64.o
+clang -Wall -Werror  -fPIC -Wno-pointer-to-int-cast -Wno-unused-command-line-argument -Wno-deprecated-declarations -framework CoreFoundation -arch arm64 -arch arm64e -isysroot  -miphoneos-version-min=11.0 -DDISABLE_SIGNING=1  -c src/Base64.c -o build/ios/Base64.o
+clang: error: no such file or directory: 'arm64'
+make[2]: *** [Makefile:11: bootstrapper] Error 1
+make[2]: Leaving directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/bootstrapper'
+make[1]: *** [Makefile:53: bootstrapper] Error 2
+make[2]: pkg-config: No such file or directory
+make[2]: xcrun: No such file or directory
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+clang -Wall -Werror  -fPIC -Wno-pointer-to-int-cast -Wno-unused-command-line-argument -Wno-deprecated-declarations -framework CoreFoundation -arch arm64 -arch arm64e -isysroot  -miphoneos-version-min=11.0 -DDISABLE_SIGNING=1  -c src/BufferedStream.c -o build/ios/BufferedStream.o
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+make[2]: *** [Makefile:82: build/ios/Base64.o] Error 1
+make[2]: *** Waiting for unfinished jobs....
+make[2]: *** [Makefile:82: build/ios/arm64.o] Error 1
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+clang: error: unsupported option '-arch' for target 'x86_64-pc-linux-gnu'
+make[2]: *** [Makefile:82: build/ios/BufferedStream.o] Error 1
+make[2]: Leaving directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/ChOma'
+make[1]: *** [Makefile:15: ChOma] Error 2
+[0;33m==> [1;33mWarning:[m Building for iOS 11.0, but the current toolchain can’t produce arm64e binaries for iOS earlier than 14.0. More information: https://theos.dev/docs/arm64e-deployment
+[0;31m==> [1;31mError:[m Your chosen SDK, “iPhoneOS16.5.sdk”, does not appear to exist.
+make[2]: *** [/opt/theos/makefiles/master/rules.mk:74: before-all] Error 1
+make[2]: Leaving directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin/opainject'
+make[1]: *** [Makefile:32: opainject] Error 2
+make[1]: Leaving directory '/media/sf_1223/Dopamine-3.x-roothide/BaseBin'
+make: *** [Makefile:14: all] Error 2
