@@ -11,7 +11,19 @@ all: basebin.tar
 
 subprojects: ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks dopamine
 
-ChOma: .build .include
+# GitHub source archives created on Windows flatten ChOma's include/choma ->
+# ../src symlink into a plain text file. Recreate its public-header directory
+# when the symlink is not available so XPF can include <choma/...>.
+prepare_choma_headers:
+	@for choma in ChOma XPF/external/ChOma; do \
+		if [ ! -d "$$choma/include/choma" ]; then \
+			rm -f "$$choma/include/choma"; \
+			mkdir -p "$$choma/include/choma"; \
+			cp "$$choma"/src/*.h "$$choma/include/choma/"; \
+		fi; \
+	done
+
+ChOma: prepare_choma_headers .build .include
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
 	@ldid -Cadhoc -s ChOma/output/ios/lib/libchoma.dylib
 	@cp ChOma/output/ios/lib/libchoma.dylib .build
@@ -146,4 +158,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar
+.PHONY: clean .build .include prepare_choma_headers ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar
