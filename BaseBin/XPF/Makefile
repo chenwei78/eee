@@ -2,7 +2,7 @@ CC = clang
 
 CHOMA_DYLIB_PATH ?= 0
 CHOMA_PATH       ?= external/ChOma
-CFLAGS            = -O2 -framework Foundation -I$(CHOMA_PATH)/include
+CFLAGS            = -O2 -framework Foundation -I$(CHOMA_PATH)/include -I../.include
 CFLAGS_MACOS      = $(CFLAGS)
 CFLAGS_IOS        = $(CFLAGS) -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=15.0 -arch arm64 -arch arm64e
 LDFLAGS           = -lcompression
