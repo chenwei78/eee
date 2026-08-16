@@ -86,11 +86,11 @@ static void RootHideAppendTrace(NSString *message)
 
 @implementation DOJailbreaker
 
-- (NSError *)prepareRootHideLaunchdTrace
+- (NSError *)beginRootHideLaunchdTrace
 {
     NSString *tracePath = RootHideLaunchdTracePath();
-    NSString *header = @"RootHide launchd diagnostic trace\n"
-                       @"The final completed phase identifies where launchd startup stopped.\n"
+    NSString *header = @"RootHide jailbreak diagnostic trace\n"
+                       @"The final completed phase identifies where the jailbreak startup stopped.\n"
                        @"This file is replaced at the start of every RootHide jailbreak attempt.\n\n";
 
     NSError *writeError = nil;
@@ -98,13 +98,20 @@ static void RootHideAppendTrace(NSString *message)
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Could not create RootHide diagnostic trace: %@", writeError.localizedDescription]}];
     }
 
+    RootHideAppendTrace(@"diagnostic trace started; the next lines come from the app and launchd");
+    return nil;
+}
+
+- (NSError *)configureRootHideLaunchdTrace
+{
+    NSString *tracePath = RootHideLaunchdTracePath();
     NSString *configPath = JBROOT_PATH(@"/basebin/.roothide_trace_path");
-    writeError = nil;
+    NSError *writeError = nil;
     if (![tracePath writeToFile:configPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Could not configure RootHide diagnostic trace: %@", writeError.localizedDescription]}];
     }
 
-    RootHideAppendTrace(@"diagnostic trace prepared; the next lines come from the app and launchd");
+    RootHideAppendTrace(@"diagnostic trace connected to launchd");
     return nil;
 }
 
@@ -635,53 +642,88 @@ void *boomerang_server(struct boomerang_info *info)
     uname(&systemInfo);
     NSString *startLog = [NSString stringWithFormat:@"Starting Jailbreak (Model: %s, %@, Configuration: {removeJailbreak=%d, tweakInjection=%d, idownload=%d, appJIT=%d})", systemInfo.machine, NSProcessInfo.processInfo.operatingSystemVersionString, removeJailbreakEnabled, tweaksEnabled, idownloadEnabled, appJITEnabled];
     [[DOUIManager sharedInstance] sendLog:startLog debug:YES];
-    
-    *errOut = [self gatherSystemInformation];
+
+    *errOut = [self beginRootHideLaunchdTrace];
     if (*errOut) return;
+    RootHideAppendTrace(@"phase: gathering system information");
+    *errOut = [self gatherSystemInformation];
+    if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: gathering system information: %@", (*errOut).localizedDescription]);
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: gathering system information");
+
+    RootHideAppendTrace(@"phase: acquiring kernel exploit");
     *errOut = [self doExploitation];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: acquiring kernel exploit: %@", (*errOut).localizedDescription]);
         // We don't care about the return value of cleanup at this point, we just need to prevent a panic on exit
         [self cleanUpExploits];
         return;
     }
+    RootHideAppendTrace(@"phase complete: acquiring kernel exploit");
     
     gSystemInfo.jailbreakSettings.markAppsAsDebugged = appJITEnabled;
     gSystemInfo.jailbreakSettings.jetsamMultiplier = jetsamMultiplierOption ? (jetsamMultiplierOption.doubleValue / 2) : 0;
     gSystemInfo.jailbreakInfo.dyld_patch_enabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"dyldPatchEnabled" fallback:NO];
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Building Phys R/W Primitive") debug:NO];
+    RootHideAppendTrace(@"phase: building physical read/write primitive");
     *errOut = [self buildPhysRWPrimitive];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: building physical read/write primitive: %@", (*errOut).localizedDescription]);
         [self cleanUpExploits];
         return;
     }
+    RootHideAppendTrace(@"phase complete: building physical read/write primitive");
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Cleaning Up Exploits") debug:NO];
+    RootHideAppendTrace(@"phase: cleaning up exploit resources");
     *errOut = [self cleanUpExploits];
-    if (*errOut) return;
+    if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: cleaning up exploit resources: %@", (*errOut).localizedDescription]);
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: cleaning up exploit resources");
     
     // We will not be able to reset this after elevating privileges, so do it now
     if (removeJailbreakEnabled) [[DOPreferenceManager sharedManager] setPreferenceValue:@NO forKey:@"removeJailbreakEnabled"];
 
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Elevating Privileges") debug:NO];
+    RootHideAppendTrace(@"phase: elevating privileges");
     *errOut = [self elevatePrivileges];
-    if (*errOut) return;
+    if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: elevating privileges: %@", (*errOut).localizedDescription]);
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: elevating privileges");
+
+    RootHideAppendTrace(@"phase: making system apps visible");
     *errOut = [self showNonDefaultSystemApps];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: making system apps visible: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: making system apps visible");
+
+    RootHideAppendTrace(@"phase: validating Developer Mode");
     *errOut = [self ensureDevModeEnabled];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: validating Developer Mode: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: validating Developer Mode");
 
     // Now that we are unsandboxed, populate the jailbreak root path
+    RootHideAppendTrace(@"phase: ensuring jailbreak root");
     *errOut = [[DOEnvironmentManager sharedManager] ensureJailbreakRootExists];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: ensuring jailbreak root: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: ensuring jailbreak root");
     
     if (removeJailbreakEnabled) {
         [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Removing Jailbreak") debug:NO];
@@ -691,11 +733,16 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
     
+    RootHideAppendTrace(@"phase: preparing RootHide bootstrap");
     *errOut = [[DOEnvironmentManager sharedManager] prepareBootstrap];
-    if (*errOut) return;
+    if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: preparing RootHide bootstrap: %@", (*errOut).localizedDescription]);
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: preparing RootHide bootstrap");
 
     [[DOUIManager sharedInstance] sendLog:@"Preparing persistent RootHide diagnostic trace" debug:NO];
-    *errOut = [self prepareRootHideLaunchdTrace];
+    *errOut = [self configureRootHideLaunchdTrace];
     if (*errOut) {
         [self cleanUpPostExploitation];
         return;

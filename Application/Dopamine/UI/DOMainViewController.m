@@ -199,6 +199,18 @@
 
 - (NSString *)rootHideTraceDiagnosisForTrace:(NSString *)trace
 {
+    if ([trace containsString:@"phase: gathering system information"] && ![trace containsString:@"phase complete: gathering system information"]) {
+        return @"诊断结论：卡在系统信息或内核偏移准备阶段；请以最后一条日志为准。";
+    }
+    if ([trace containsString:@"phase: acquiring kernel exploit"] && ![trace containsString:@"phase complete: acquiring kernel exploit"]) {
+        return @"诊断结论：卡在内核漏洞获取阶段；这发生在 RootHide 初始化之前。";
+    }
+    if ([trace containsString:@"phase: building physical read/write primitive"] && ![trace containsString:@"phase complete: building physical read/write primitive"]) {
+        return @"诊断结论：漏洞已获取，但卡在构建内核读写原语阶段。";
+    }
+    if ([trace containsString:@"phase: preparing RootHide bootstrap"] && ![trace containsString:@"phase complete: preparing RootHide bootstrap"]) {
+        return @"诊断结论：卡在 RootHide Bootstrap 文件准备阶段，尚未进入 BaseBin TrustCache 或 launchd 注入。";
+    }
     if ([trace containsString:@"FAILURE: opainject returned"]) {
         return @"诊断结论：opainject 已返回错误。错误码见上一行，launchdhook 没有完成启动。";
     }
@@ -234,7 +246,7 @@
 
     NSString *tracePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"];
     NSString *trace = [NSString stringWithContentsOfFile:tracePath encoding:NSUTF8StringEncoding error:nil];
-    if (![trace containsString:@"RootHide launchd diagnostic trace"]) return;
+    if (![trace containsString:@"RootHide jailbreak diagnostic trace"]) return;
 
     self.didPresentRootHideTrace = YES;
     NSMutableArray<NSString *> *traceLines = [NSMutableArray array];
