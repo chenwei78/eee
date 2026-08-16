@@ -50,7 +50,7 @@
 
     if([path hasPrefix:@"/var/mobile/Library/SplashBoard/Snapshots/"] && (![self.bundleIdentifier hasPrefix:@"com.apple."] || is_apple_internal_identifier(self.bundleIdentifier.UTF8String))) {
         NSLog(@"snapshotContainerPath redirect %@ : %@", self.bundleIdentifier, path);
-        path = jbroot(path);
+        path = [NSString stringWithUTF8String:jbroot(path.fileSystemRepresentation)];
     }
 
     return path;
