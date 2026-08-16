@@ -161,6 +161,11 @@ int initJailbreakd(bool firstLoad)
 	return spawnJailbreakd();
 }
 
+bool jailbreakdIsInitialized(void)
+{
+	return __jailbreakd_initialized;
+}
+
 mach_port_t reactiveJailbreakdPort()
 {
 /* restarting jailbreakd may cause it to lose its previous internal state, 

@@ -136,7 +136,19 @@ static int roothide_blacklist_check(audit_token_t *callerToken, const char* chec
 
 static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *portOut)
 {
-	*portOut = xpc_mach_send_create(jailbreakdClientPort());
+	// During the first live injection launchd is executing inside opainject's
+	// ROP call, so roothide_launchd_postinit deliberately defers jailbreakd.
+	// This XPC handler only runs after the constructor returned and launchd's
+	// normal threads have resumed; it is therefore the safe point to start it.
+	if (!jailbreakdIsInitialized() && initJailbreakd(true) != 0) {
+		return -1;
+	}
+
+	mach_port_t port = jailbreakdClientPort();
+	if (!MACH_PORT_VALID(port)) {
+		return -1;
+	}
+	*portOut = xpc_mach_send_create(port);
 	return 0;
 }
 
