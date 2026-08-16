@@ -602,7 +602,7 @@ NSURL* new_LSGetInboxURLForBundleIdentifier(NSString* bundleIdentifier)
 			&& [pathURL.path hasPrefix:@"/var/mobile/Library/Application Support/Containers/"])
 	{
 		NSLog(@"redirect Inbox %@ : %@", bundleIdentifier, pathURL);
-		pathURL = [NSURL fileURLWithPath:jbroot(pathURL.path)]; //require unsandboxing file-write-read for jbroot:/var/
+		pathURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:jbroot(pathURL.fileSystemRepresentation)]]; //require unsandboxing file-write-read for jbroot:/var/
 	}
 
 	return pathURL;
