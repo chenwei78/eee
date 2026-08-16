@@ -90,7 +90,7 @@ jobs:
         run: |
             set -x
             cd Application/Dopamine/Resources
-            ./download_bootstraps.sh
+            bash ./download_bootstraps.sh
 
       - name: Build
         run: |
