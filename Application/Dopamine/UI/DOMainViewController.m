@@ -24,6 +24,7 @@
 @property DOActionMenuButton *updateButton;
 @property(nonatomic) BOOL hideStatusBar;
 @property(nonatomic) BOOL hideHomeIndicator;
+@property(nonatomic) BOOL didPresentRootHideTrace;
 
 @end
 
@@ -76,7 +77,7 @@
     //Header
     DOHeaderView *headerView = [[DOHeaderView alloc] initWithImage: [UIImage imageNamed:@"Dopamine"] subtitles: @[
         [DOGlobalAppearance mainSubtitleString:[[DOEnvironmentManager sharedManager] versionSupportString]],
-        [DOGlobalAppearance secondarySubtitleString:DOLocalizedString(@"Credits_Made_By")],
+        [DOGlobalAppearance secondarySubtitleString:[NSString stringWithFormat:@"%@, ChatGPT", DOLocalizedString(@"Credits_Made_By")]],
     ]];
     
     [stackView addArrangedSubview:headerView];
@@ -194,6 +195,55 @@
 {
     [super viewWillAppear:animated];
     [self.jailbreakBtn.button setTitle:[self jailbreakButtonTitle] forState:UIControlStateNormal];
+}
+
+- (NSString *)rootHideTraceDiagnosisForTrace:(NSString *)trace
+{
+    if ([trace containsString:@"FAILURE: opainject returned"]) {
+        return @"诊断结论：opainject 已返回错误。错误码见上一行，launchdhook 没有完成启动。";
+    }
+    if (![trace containsString:@"[launchd] constructor entered"]) {
+        return @"诊断结论：opainject 已开始向 launchd 注入，但 launchdhook 构造函数没有进入。中断点在 ROP dlopen 调用内部。";
+    }
+    if (![trace containsString:@"phase complete: boomerang primitive recovery"]) {
+        return @"诊断结论：launchdhook 已进入，但在把内核原语从 Dopamine 交接给 launchd 的阶段中断。";
+    }
+    if (![trace containsString:@"phase complete: jetsam hooks"]) {
+        return @"诊断结论：内核原语已交接；失败发生在 Dopamine 原生 launchd hook 初始化期间。最后一个“phase complete”即最后成功阶段。";
+    }
+    if ([trace containsString:@"FAILURE: could not install systemhook"]) {
+        return @"诊断结论：RootHide 无法把 systemhook 安装到 /usr/lib。";
+    }
+    if ([trace containsString:@"FAILURE: jailbreakd initialization returned"]) {
+        return @"诊断结论：RootHide jailbreakd 启动失败，返回码见上一行。";
+    }
+    if ([trace containsString:@"phase: RootHide post-initialization"] && ![trace containsString:@"phase complete: RootHide post-initialization"]) {
+        return @"诊断结论：Dopamine 原生 launchd hook 已完成；失败发生在 RootHide 服务初始化。";
+    }
+    if (![trace containsString:@"phase complete: launchd primitive-handoff acknowledgement received"]) {
+        return @"诊断结论：launchd 已继续执行，但 Dopamine 没有收到原语交接确认。请以最后一条日志为准。";
+    }
+    return @"诊断结论：启动流程已通过已记录阶段；请分享完整日志以确认用户空间重启后的后续状态。";
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+
+    if (self.didPresentRootHideTrace || [[DOEnvironmentManager sharedManager] isJailbroken]) return;
+
+    NSString *tracePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"];
+    NSString *trace = [NSString stringWithContentsOfFile:tracePath encoding:NSUTF8StringEncoding error:nil];
+    if (![trace containsString:@"RootHide launchd diagnostic trace"]) return;
+
+    self.didPresentRootHideTrace = YES;
+    NSMutableArray<NSString *> *traceLines = [NSMutableArray array];
+    for (NSString *line in [trace componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (line.length > 0) [traceLines addObject:line];
+    }
+    [traceLines addObject:[self rootHideTraceDiagnosisForTrace:trace]];
+    [DOUIManager sharedInstance].logRecord = traceLines;
+    [self.navigationController pushViewController:[[DOLogCrashViewController alloc] initWithTitle:@"RootHide 启动诊断"] animated:YES];
 }
 
 - (void)startJailbreak

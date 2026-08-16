@@ -107,6 +107,12 @@
 					<key>link</key>
 					<string>https://x.com/wh1te4ever</string>
 				</dict>
+				<dict>
+					<key>name</key>
+					<string>ChatGPT</string>
+					<key>link</key>
+					<string>https://chatgpt.com/</string>
+				</dict>
 			</array>
 		</dict>
 		<dict>

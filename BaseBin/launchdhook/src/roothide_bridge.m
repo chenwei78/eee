@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <libjailbreak/libjailbreak.h>
 #import <libjailbreak/roothider.h>
+#import "roothide_trace.h"
 
 /*
  * Small bridge between Dopamine 3's modern launchdhook and RootHide's
@@ -17,12 +18,15 @@ void roothide_launchd_postinit(bool firstLoad)
 {
     launchdhookFirstLoad = firstLoad;
 
+    roothide_trace("[roothide] post-initialization entered; firstLoad=%d", firstLoad);
+
     // On the first load launchdhook is entered through opainject's ROP
     // thread while the other launchd threads are suspended.  Starting the
     // RootHide service here can block posix_spawn during dlopen and trigger
     // a userspace restart.  Dopamine will perform a userspace reboot after
     // it has generated the RootHide environment; initialize then instead.
     if (firstLoad) {
+        roothide_trace("[roothide] deferred until the userspace reboot; this is expected on first injection");
         return;
     }
 
@@ -35,6 +39,7 @@ void roothide_launchd_postinit(bool firstLoad)
         const char *systemhookPath = JBROOT_PATH("/basebin/systemhook.dylib");
         if (systemhookPath && access(systemhookPath, F_OK) == 0) {
             if (unsandbox("/usr/lib", systemhookPath) != 0) {
+                roothide_trace("[roothide] FAILURE: could not install systemhook in /usr/lib");
                 launchd_panic("RootHide systemhook installation failed");
                 return;
             }
@@ -48,7 +53,12 @@ void roothide_launchd_postinit(bool firstLoad)
     }
 
     loadAppStoredIdentifiers();
-    if (initJailbreakd(firstLoad) != 0) {
+    int jailbreakdResult = initJailbreakd(firstLoad);
+    if (jailbreakdResult != 0) {
+        roothide_trace("[roothide] FAILURE: jailbreakd initialization returned %d", jailbreakdResult);
         launchd_panic("RootHide jailbreakd initialization failed");
+    }
+    else {
+        roothide_trace("[roothide] phase complete: jailbreakd initialization");
     }
 }

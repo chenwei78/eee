@@ -9,6 +9,7 @@
 #include <libjailbreak/kcall_arm64.h>
 #include <libjailbreak/stock_fixes.h>
 #include <unistd.h>
+#include "roothide_trace.h"
 
 int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *__restrict attr, mach_port_t portarray[], uint32_t count);
 
@@ -64,9 +65,15 @@ int boomerang_recoverPrimitives(bool firstRetrieval, bool shouldEndBoomerang)
 	// Use it to recover primitives, afterwards replace it with MACH_PORT_NULL to make launchd happy
 	mach_port_t *registeredPorts;
 	mach_msg_type_number_t registeredPortsCount = 0;
-	if (mach_ports_lookup(mach_task_self(), &registeredPorts, &registeredPortsCount) != 0 || registeredPortsCount < 3) return -1;
+	if (mach_ports_lookup(mach_task_self(), &registeredPorts, &registeredPortsCount) != 0 || registeredPortsCount < 3) {
+		roothide_trace("[boomerang] FAILURE: launchd has no registered primitive port");
+		return -1;
+	}
 	mach_port_t boomerangPort = registeredPorts[2];
-	if (boomerangPort == MACH_PORT_NULL) return -2;
+	if (boomerangPort == MACH_PORT_NULL) {
+		roothide_trace("[boomerang] FAILURE: registered primitive port is null");
+		return -2;
+	}
 	jbclient_xpc_set_custom_port(boomerangPort);
 	registeredPorts[2] = MACH_PORT_NULL;
 	mach_ports_register(mach_task_self(), registeredPorts, registeredPortsCount);
@@ -84,10 +91,13 @@ int boomerang_recoverPrimitives(bool firstRetrieval, bool shouldEndBoomerang)
 	// Handing off full physrw from the app is really slow and causes watchdog timeouts
 	// But from launchd it's generally fine, no clue why
 	bool physrwPTE = firstRetrieval && !is_kcall_available();
+	roothide_trace("[boomerang] initializing primitives; physrwPTE=%d", physrwPTE);
 	jbclient_initialize_primitives_internal(physrwPTE);
+	roothide_trace("[boomerang] primitive initialization returned");
 
 	if (shouldEndBoomerang) {
 		// Send done message to boomerang
+		roothide_trace("[boomerang] notifying Dopamine that primitive handoff is complete");
 		jbclient_boomerang_done();
 
 		// Remove boomerang zombie proc if needed

@@ -66,7 +66,47 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     JBErrorCodeFailedDuplicateApps           = -14,
 };
 
+static NSString *RootHideLaunchdTracePath(void)
+{
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"];
+}
+
+static void RootHideAppendTrace(NSString *message)
+{
+    NSString *tracePath = RootHideLaunchdTracePath();
+    NSFileHandle *traceFile = [NSFileHandle fileHandleForWritingAtPath:tracePath];
+    if (!traceFile) return;
+
+    NSString *line = [NSString stringWithFormat:@"[app] %@\n", message];
+    [traceFile seekToEndOfFile];
+    [traceFile writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    [traceFile synchronizeFile];
+    [traceFile closeFile];
+}
+
 @implementation DOJailbreaker
+
+- (NSError *)prepareRootHideLaunchdTrace
+{
+    NSString *tracePath = RootHideLaunchdTracePath();
+    NSString *header = @"RootHide launchd diagnostic trace\n"
+                       @"The final completed phase identifies where launchd startup stopped.\n"
+                       @"This file is replaced at the start of every RootHide jailbreak attempt.\n\n";
+
+    NSError *writeError = nil;
+    if (![header writeToFile:tracePath atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Could not create RootHide diagnostic trace: %@", writeError.localizedDescription]}];
+    }
+
+    NSString *configPath = JBROOT_PATH(@"/basebin/.roothide_trace_path");
+    writeError = nil;
+    if (![tracePath writeToFile:configPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Could not configure RootHide diagnostic trace: %@", writeError.localizedDescription]}];
+    }
+
+    RootHideAppendTrace(@"diagnostic trace prepared; the next lines come from the app and launchd");
+    return nil;
+}
 
 - (NSError *)gatherSystemInformation
 {
@@ -424,16 +464,21 @@ void *boomerang_server(struct boomerang_info *info)
             return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"Waiting for jbctl failed"}];
         }
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+    RootHideAppendTrace(@"phase complete: launchd primitive port stashed");
 
     // Inject launchdhook.dylib into launchd via opainject
+    RootHideAppendTrace(@"phase: invoking opainject for launchd (PID 1)");
     int r = exec_cmd(JBROOT_PATH("/basebin/opainject"), "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
     if (r != 0) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: opainject returned %d", r]);
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"opainject failed with error code %d", r]}];
     }
+    RootHideAppendTrace(@"phase complete: opainject returned; waiting for primitive-handoff acknowledgement");
 
     // Wait for everything to finish
     dispatch_semaphore_wait(info.boomerangDone, DISPATCH_TIME_FOREVER);
     mach_port_deallocate(mach_task_self(), serverPort);
+    RootHideAppendTrace(@"phase complete: launchd primitive-handoff acknowledgement received");
 
     return nil;
 }
@@ -661,6 +706,13 @@ void *boomerang_server(struct boomerang_info *info)
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Loading BaseBin TrustCache") debug:NO];
     *errOut = [self loadBasebinTrustcache];
+    if (*errOut) {
+        [self cleanUpPostExploitation];
+        return;
+    }
+
+    [[DOUIManager sharedInstance] sendLog:@"Preparing persistent RootHide diagnostic trace" debug:NO];
+    *errOut = [self prepareRootHideLaunchdTrace];
     if (*errOut) {
         [self cleanUpPostExploitation];
         return;

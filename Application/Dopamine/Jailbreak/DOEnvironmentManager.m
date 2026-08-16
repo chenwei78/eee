@@ -77,13 +77,7 @@ extern char **environ;
 
 - (NSString *)appVersionDisplayString
 {
-    NSString *nightlyHash = [self nightlyHash];
-    if (nightlyHash) {
-        return [NSString stringWithFormat:@"%@~%@", self.appVersion, [nightlyHash substringToIndex:6]];
-    }
-    else {
-        return [self appVersion];
-    }
+    return [NSString stringWithFormat:@"%@ roothide by.ChatGPT", self.appVersion];
 }
 
 - (NSString *)privatePrebootPath

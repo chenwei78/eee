@@ -26,6 +26,7 @@
 #import "jetsam_hook.h"
 #import "crashreporter.h"
 #import "boomerang.h"
+#import "roothide_trace.h"
 #import "update.h"
 #import "jbserver/jbserver_local.h"
 #import "asl.h"
@@ -89,9 +90,12 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 
 __attribute__((constructor)) static void initializer(void)
 {
-	crashreporter_start();
-	roothide_launchd_preinit();
-
+	// During the first live injection opainject has suspended launchd's
+	// existing threads.  The RootHide crash reporter creates its own exception
+	// thread, so start it only after the subsequent userspace reboot.
+	if (getenv("DOPAMINE_INITIALIZED") != 0) {
+		crashreporter_start();
+	}
 	// Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
 	@autoreleasepool {
 		Dl_info selfInfo;
@@ -100,6 +104,11 @@ __attribute__((constructor)) static void initializer(void)
 			gSystemInfo.jailbreakInfo.rootPath = strdup(selfPath.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.fileSystemRepresentation);
 		}
 	}
+	roothide_trace_init();
+	roothide_trace("[launchd] constructor entered; DOPAMINE_INITIALIZED=%d", getenv("DOPAMINE_INITIALIZED") != NULL);
+	roothide_trace("[launchd] phase: RootHide pre-initialization");
+	roothide_launchd_preinit();
+	roothide_trace("[launchd] phase complete: RootHide pre-initialization");
 
 	// If we performed a jbupdate before the userspace reboot, these vars will be set
 	// In that case, we want to run finalizers
@@ -135,13 +144,16 @@ __attribute__((constructor)) static void initializer(void)
 		firstLoad = true;
 	}
 
+	roothide_trace("[launchd] phase: recovering boomerang primitives; firstLoad=%d", firstLoad);
 	int err = boomerang_recoverPrimitives(firstLoad, true);
 	if (err != 0) {
+		roothide_trace("[launchd] FAILURE: boomerang primitive recovery returned %d", err);
 		char msg[1000];
 		snprintf(msg, 1000, "Dopamine: Failed to recover primitives (error %d), cannot continue.", err);
 		abort_with_reason(7, 1, msg, 0);
 		return;
 	}
+	roothide_trace("[launchd] phase complete: boomerang primitive recovery");
 
 	if (jbupdatePrevVersion && jbupdateNewVersion) {
 		jbupdate_finalize_stage2(jbupdatePrevVersion, jbupdateNewVersion);
@@ -150,6 +162,7 @@ __attribute__((constructor)) static void initializer(void)
 	}
 
 	cs_allow_invalid(proc_self(), false);
+	roothide_trace("[launchd] phase complete: code-signing setup");
 
 	if (__builtin_available(iOS 19.0, *)) {
 		// On iOS 26+, hooks have to be applied through hookd
@@ -160,10 +173,15 @@ __attribute__((constructor)) static void initializer(void)
 	}
 
 	initXPCHooks();
+	roothide_trace("[launchd] phase complete: XPC hooks");
 	initDaemonHooks();
+	roothide_trace("[launchd] phase complete: daemon hooks");
 	initSpawnHooks();
+	roothide_trace("[launchd] phase complete: spawn hooks");
 	initIPCHooks();
+	roothide_trace("[launchd] phase complete: IPC hooks");
 	initJetsamHook();
+	roothide_trace("[launchd] phase complete: jetsam hooks");
 
 	sysctlbyname_orig = sysctlbyname;
 	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)sysctlbyname, (void *)sysctlbyname_hook, NULL);
@@ -196,5 +214,7 @@ __attribute__((constructor)) static void initializer(void)
 	// Part of rootless v2 spec
 	setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);
 
+	roothide_trace("[launchd] phase: RootHide post-initialization");
 	roothide_launchd_postinit(firstLoad);
+	roothide_trace("[launchd] phase complete: RootHide post-initialization");
 }
