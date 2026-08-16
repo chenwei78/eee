@@ -16,6 +16,16 @@ void roothide_launchd_preinit(void)
 void roothide_launchd_postinit(bool firstLoad)
 {
     launchdhookFirstLoad = firstLoad;
+
+    // On the first load launchdhook is entered through opainject's ROP
+    // thread while the other launchd threads are suspended.  Starting the
+    // RootHide service here can block posix_spawn during dlopen and trigger
+    // a userspace restart.  Dopamine will perform a userspace reboot after
+    // it has generated the RootHide environment; initialize then instead.
+    if (firstLoad) {
+        return;
+    }
+
     exec_set_patch(true);
 
     // Dopamine 3's systemhook keeps the modern iOS 18 implementation and
