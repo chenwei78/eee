@@ -95,6 +95,25 @@ static void RootHideAppendTrace(NSString *message)
     [traceFile closeFile];
 }
 
+static BOOL RootHideWaitForDeferredJailbreakd(void)
+{
+    // The first lookup is handled by launchd after the injected constructor
+    // has returned, which is the safe point where it can spawn jailbreakd.
+    // Keep polling until jailbreakd has checked in and launchd returns a
+    // usable client port.  This avoids sending a synchronous patch request to
+    // a port whose server is not ready yet.
+    for (int attempt = 1; attempt <= 100; attempt++) {
+        mach_port_t port = jbclient_jailbreakd_lookup();
+        if (MACH_PORT_VALID(port)) {
+            mach_port_deallocate(mach_task_self(), port);
+            RootHideAppendTrace([NSString stringWithFormat:@"deferred jailbreakd ready after %d attempt(s)", attempt]);
+            return YES;
+        }
+        usleep(50000);
+    }
+    return NO;
+}
+
 @implementation DOJailbreaker
 
 - (NSError *)beginRootHideLaunchdTrace
@@ -837,19 +856,29 @@ void *boomerang_server(struct boomerang_info *info)
     // killall here would spawn the first child after RootHide patching is enabled,
     // which can block before the RootHide bootstrap finalizer is reached.
     RootHideAppendTrace(@"phase complete: deferred iconservicesagent restart until userspace reboot");
+
+    // launchdhook deliberately postpones jailbreakd while its constructor is
+    // running inside opainject.  The constructor has returned now, so request
+    // the deferred service and wait for its check-in before Bootstrap starts.
+    // Bootstrap children can then use the normal patch path instead of merely
+    // trusting the outer /bin/sh process.
+    RootHideAppendTrace(@"phase: starting deferred jailbreakd for Bootstrap child patching");
+    if (!RootHideWaitForDeferredJailbreakd()) {
+        RootHideAppendTrace(@"FAILURE: deferred jailbreakd did not become ready within 5 seconds");
+        *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"RootHide jailbreakd did not become ready for Bootstrap"}];
+        [self cleanUpPostExploitation];
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: deferred jailbreakd ready for Bootstrap child patching");
     
     RootHideAppendTrace(@"phase: finalizing RootHide bootstrap");
-    // During the first injection jailbreakd is intentionally deferred until
-    // userspace reboot.  Trust every Bootstrap child recursively, but do not
-    // make its spawn wait on the not-yet-ready jailbreakd service.
     // SpringBoard cannot show the terminal-password prompt during the first
     // Bootstrap.  Avoid the prep script retrying a killed uialert forever.
     setenv("NO_PASSWORD_PROMPT", "1", 1);
-    setenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY", "1", 1);
-    exec_set_bootstrap_trust_only(true);
-    *errOut = [self finalizeBootstrapIfNeeded];
-    exec_set_bootstrap_trust_only(false);
     unsetenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY");
+    exec_set_bootstrap_trust_only(false);
+    *errOut = [self finalizeBootstrapIfNeeded];
+    unsetenv("NO_PASSWORD_PROMPT");
     if (*errOut) {
         RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: finalizing RootHide bootstrap: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
