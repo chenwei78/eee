@@ -47,6 +47,28 @@ struct hfs_mount_args {
 
 NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
+static NSString *RootHideDiagnosticTracePath(void)
+{
+    NSString *configPath = JBROOT_PATH(@"/basebin/.roothide_trace_path");
+    NSString *tracePath = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil];
+    return [tracePath stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static void RootHideAppendBootstrapTrace(NSString *message)
+{
+    NSString *tracePath = RootHideDiagnosticTracePath();
+    if (tracePath.length == 0) return;
+
+    NSFileHandle *traceFile = [NSFileHandle fileHandleForWritingAtPath:tracePath];
+    if (!traceFile) return;
+
+    NSString *line = [NSString stringWithFormat:@"[bootstrap] %@\n", message];
+    [traceFile seekToEndOfFile];
+    [traceFile writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    [traceFile synchronizeFile];
+    [traceFile closeFile];
+}
+
 @implementation DOBootstrapper
 
 - (instancetype)init
@@ -515,10 +537,13 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     for (NSDictionary *packageManagerDict in enabledPackageManagers) {
         NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:packageManagerDict[@"Package"]];
         NSString *name = packageManagerDict[@"Display Name"];
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"installing package manager: %@", name]);
         int r = [self installPackage:path];
         if (r != 0) {
+            RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: installing package manager %@ returned %d", name, r]);
             return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install %@: %d\n", name, r]}];
         }
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"installed package manager: %@", name]);
     }
     return nil;
 }
@@ -823,25 +848,48 @@ static NSError *rootHideError(NSInteger code, NSString *message)
     NSString *prepScript = rootHideJbrootPath(@"/prep_bootstrap.sh");
     if ([NSFileManager.defaultManager fileExistsAtPath:prepScript]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing RootHide Bootstrap" debug:NO];
-        int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, "/prep_bootstrap.sh", NULL);
-        if (r != 0) return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"prep_bootstrap.sh returned %d", r]);
+        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh with shell trace");
 
+        NSString *tracePath = RootHideDiagnosticTracePath();
+        NSString *runnerPath = rootHideJbrootPath(@"/.roothide_prep_trace.sh");
+        NSString *runnerContents = @"#!/bin/sh\nexec /bin/sh -x /prep_bootstrap.sh >> \"$ROOTHIDE_TRACE_PATH\" 2>&1\n";
+        BOOL traceRunnerReady = tracePath.length > 0 && [runnerContents writeToFile:runnerPath atomically:YES encoding:NSUTF8StringEncoding error:nil] && chmod(runnerPath.fileSystemRepresentation, 0755) == 0;
+        if (traceRunnerReady) setenv("ROOTHIDE_TRACE_PATH", tracePath.fileSystemRepresentation, 1);
+
+        int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, traceRunnerReady ? "/.roothide_prep_trace.sh" : "/prep_bootstrap.sh", NULL);
+        if (traceRunnerReady) [[NSFileManager defaultManager] removeItemAtPath:runnerPath error:nil];
+        if (r != 0) {
+            RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: prep_bootstrap.sh returned %d", r]);
+            return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"prep_bootstrap.sh returned %d", r]);
+        }
+        RootHideAppendBootstrapTrace(@"phase complete: prep_bootstrap.sh");
+
+        RootHideAppendBootstrapTrace(@"phase: installing selected package managers");
         NSError *error = [self installPackageManagers];
         if (error) return error;
+        RootHideAppendBootstrapTrace(@"phase complete: installing selected package managers");
 
         NSString *manager = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"roothideapp.deb"];
         if ([NSFileManager.defaultManager fileExistsAtPath:manager]) {
+            RootHideAppendBootstrapTrace(@"phase: installing roothideapp.deb");
             r = [self installPackage:manager];
-            if (r != 0) return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"Installing roothideapp.deb failed: %d", r]);
+            if (r != 0) {
+                RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: installing roothideapp.deb returned %d", r]);
+                return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"Installing roothideapp.deb failed: %d", r]);
+            }
+            RootHideAppendBootstrapTrace(@"phase complete: installing roothideapp.deb");
         }
     }
 
     // launchdhook uses this marker for the authoritative RootHide status.
     // The randomized jbroot itself is created much earlier, so its presence
     // alone must not make a failed bootstrap appear jailbroken.
+    RootHideAppendBootstrapTrace(@"phase: writing RootHide bootstrap completion marker");
     if (![[NSData data] writeToFile:rootHideJbrootPath(@"/.roothide_bootstrap_complete") atomically:YES]) {
+        RootHideAppendBootstrapTrace(@"FAILURE: writing RootHide bootstrap completion marker");
         return rootHideError(BootstrapErrorCodeFailedFinalising, @"Could not write the RootHide bootstrap completion marker");
     }
+    RootHideAppendBootstrapTrace(@"phase complete: writing RootHide bootstrap completion marker");
     return nil;
 }
 

@@ -5,6 +5,7 @@
 #include <libjailbreak/libjailbreak.h>
 #include <libjailbreak/roothider.h>
 #include <libjailbreak/codesign.h>
+#include "../roothide_trace.h"
 
 int roothide_unsupport_request()
 {
@@ -140,14 +141,20 @@ static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *
 	// ROP call, so roothide_launchd_postinit deliberately defers jailbreakd.
 	// This XPC handler only runs after the constructor returned and launchd's
 	// normal threads have resumed; it is therefore the safe point to start it.
-	if (!jailbreakdIsInitialized() && initJailbreakd(true) != 0) {
-		return -1;
-	}
+    roothide_trace("[launchd] jailbreakd lookup from pid=%d; initialized=%d", audit_token_to_pid(*callerToken), jailbreakdIsInitialized());
+    if (!jailbreakdIsInitialized()) {
+        roothide_trace("[launchd] starting deferred jailbreakd");
+        int initResult = initJailbreakd(true);
+        roothide_trace("[launchd] deferred jailbreakd start returned %d", initResult);
+        if (initResult != 0) return -1;
+    }
 
-	mach_port_t port = jailbreakdClientPort();
-	if (!MACH_PORT_VALID(port)) {
-		return -1;
-	}
+    mach_port_t port = jailbreakdClientPort();
+    if (!MACH_PORT_VALID(port)) {
+        roothide_trace("[launchd] jailbreakd lookup failed: invalid client port");
+        return -1;
+    }
+    roothide_trace("[launchd] jailbreakd lookup returned a client port");
 	*portOut = xpc_mach_send_create(port);
 	return 0;
 }

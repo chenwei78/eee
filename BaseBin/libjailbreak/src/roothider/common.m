@@ -1,9 +1,13 @@
 #import <Foundation/Foundation.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <spawn.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 #include <libgen.h>
 #include <sandbox.h>
 #include <libproc.h>
@@ -22,6 +26,39 @@
 #include "log.h"
 
 bool launchdhookFirstLoad = false;
+
+// This remains available before jailbreakd starts, unlike the regular debug
+// logger.  Read the trace path on every call because early bootstrap spawns
+// occur before the app has installed the trace-path configuration file.
+static void roothide_spawn_trace(const char *format, ...)
+{
+    if (!format) return;
+
+    int config = open(JBROOT_PATH("/basebin/.roothide_trace_path"), O_RDONLY);
+    if (config < 0) return;
+
+    char tracePath[PATH_MAX] = {0};
+    ssize_t pathLength = read(config, tracePath, sizeof(tracePath) - 1);
+    close(config);
+    if (pathLength <= 0) return;
+    tracePath[pathLength] = '\0';
+    tracePath[strcspn(tracePath, "\r\n")] = '\0';
+
+    int trace = open(tracePath, O_WRONLY | O_APPEND);
+    if (trace < 0) return;
+
+    char message[900] = {0};
+    va_list args;
+    va_start(args, format);
+    int messageLength = vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    if (messageLength > 0) {
+        dprintf(trace, "[spawn] %.*s\n", (int)MIN((size_t)messageLength, sizeof(message) - 1), message);
+        fsync(trace);
+    }
+    close(trace);
+}
 
 // To replace dyld patch, make dyld respect DYLD_ environment variables
 int proc_patch_csflags(pid_t pid)
@@ -706,16 +743,21 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
         need_patch_child = false;
     }
 
+    short flags=0;
+    posix_spawnattr_getflags(attrp, &flags);
+    bool should_resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
+
+    roothide_spawn_trace("begin path=%s argc=%d exec_patch=%d patch_child=%d resume=%d", path ?: "(null)", argc, exec_patch_enabled, need_patch_child, should_resume);
+
     if(need_patch_child && !dyld_patch_enabled()) {
-        if(jbclient_trust_executable_recurse(path, NULL) != 0) {
+        roothide_spawn_trace("trusting executable recursively: %s", path ?: "(null)");
+        int trustResult = jbclient_trust_executable_recurse(path, NULL);
+        roothide_spawn_trace("recursive trust returned %d for %s", trustResult, path ?: "(null)");
+        if(trustResult != 0) {
             JBLogError("Failed to trust executable: %s", path);
             return 999;
         }
     }
-
-    short flags=0;
-    posix_spawnattr_getflags(attrp, &flags);
-    bool should_resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
 
     JBLogDebug("exec_cmd_roothide_spawn path=%s flags=%x", path, flags);
     if (argv) for (int i = 0; argv[i]; i++) JBLogDebug("\targs[%d] = %s", i, argv[i]);
@@ -728,12 +770,16 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     if(pidp) *pidp = pid;
 
     JBLogDebug("spawn ret=%d pid=%d", ret, pid);
+    roothide_spawn_trace("posix_spawn returned %d pid=%d path=%s", ret, pid, path ?: "(null)");
 
     if(ret == 0 && pid > 0) 
     {
         if(need_patch_child) {
             // will fail before launchdhook injected and dyld patched, eg: opainject...
-            if(jbdSpawnPatchChild(pid, should_resume) != 0) {
+            roothide_spawn_trace("requesting jailbreakd child patch pid=%d resume=%d", pid, should_resume);
+            int patchResult = jbdSpawnPatchChild(pid, should_resume);
+            roothide_spawn_trace("jailbreakd child patch returned %d for pid=%d", patchResult, pid);
+            if(patchResult != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
                 //jailbreak internal spawn, just let it hang forever so that we could get a panic log
                 //kill(pid, SIGQUIT); //core dump
@@ -742,7 +788,8 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
             }
         } else {
             if (should_resume) {
-                kill(pid, SIGCONT);
+                int signalResult = kill(pid, SIGCONT);
+                roothide_spawn_trace("resumed unpatched child pid=%d result=%d", pid, signalResult);
             }
         }
     }
