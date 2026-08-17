@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -36,6 +37,12 @@ void roothide_trace(const char *format, ...)
 
     int trace = open(gRootHideTracePath, O_WRONLY | O_APPEND);
     if (trace < 0) return;
+
+    struct stat traceStatus = {0};
+    if (fstat(trace, &traceStatus) != 0 || traceStatus.st_size >= 256 * 1024) {
+        close(trace);
+        return;
+    }
 
     char line[1024];
     va_list args;

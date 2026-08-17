@@ -59,6 +59,8 @@ static void RootHideAppendBootstrapTrace(NSString *message)
     NSString *tracePath = RootHideDiagnosticTracePath();
     if (tracePath.length == 0) return;
 
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:tracePath error:nil];
+    if ([attributes[NSFileSize] unsignedLongLongValue] >= 256 * 1024) return;
     NSFileHandle *traceFile = [NSFileHandle fileHandleForWritingAtPath:tracePath];
     if (!traceFile) return;
 
@@ -848,16 +850,8 @@ static NSError *rootHideError(NSInteger code, NSString *message)
     NSString *prepScript = rootHideJbrootPath(@"/prep_bootstrap.sh");
     if ([NSFileManager.defaultManager fileExistsAtPath:prepScript]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing RootHide Bootstrap" debug:NO];
-        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh with shell trace");
-
-        NSString *tracePath = RootHideDiagnosticTracePath();
-        NSString *runnerPath = rootHideJbrootPath(@"/.roothide_prep_trace.sh");
-        NSString *runnerContents = @"#!/bin/sh\nexec /bin/sh -x /prep_bootstrap.sh >> \"$ROOTHIDE_TRACE_PATH\" 2>&1\n";
-        BOOL traceRunnerReady = tracePath.length > 0 && [runnerContents writeToFile:runnerPath atomically:YES encoding:NSUTF8StringEncoding error:nil] && chmod(runnerPath.fileSystemRepresentation, 0755) == 0;
-        if (traceRunnerReady) setenv("ROOTHIDE_TRACE_PATH", tracePath.fileSystemRepresentation, 1);
-
-        int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, traceRunnerReady ? "/.roothide_prep_trace.sh" : "/prep_bootstrap.sh", NULL);
-        if (traceRunnerReady) [[NSFileManager defaultManager] removeItemAtPath:runnerPath error:nil];
+        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (script output is capped)");
+        int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, "/prep_bootstrap.sh", NULL);
         if (r != 0) {
             RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: prep_bootstrap.sh returned %d", r]);
             return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"prep_bootstrap.sh returned %d", r]);

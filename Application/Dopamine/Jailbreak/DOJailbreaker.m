@@ -83,6 +83,8 @@ static NSString *RootHideLaunchdTracePath(void)
 static void RootHideAppendTrace(NSString *message)
 {
     NSString *tracePath = RootHideLaunchdTracePath();
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:tracePath error:nil];
+    if ([attributes[NSFileSize] unsignedLongLongValue] >= 256 * 1024) return;
     NSFileHandle *traceFile = [NSFileHandle fileHandleForWritingAtPath:tracePath];
     if (!traceFile) return;
 
@@ -840,6 +842,9 @@ void *boomerang_server(struct boomerang_info *info)
     // During the first injection jailbreakd is intentionally deferred until
     // userspace reboot.  Trust every Bootstrap child recursively, but do not
     // make its spawn wait on the not-yet-ready jailbreakd service.
+    // SpringBoard cannot show the terminal-password prompt during the first
+    // Bootstrap.  Avoid the prep script retrying a killed uialert forever.
+    setenv("NO_PASSWORD_PROMPT", "1", 1);
     exec_set_bootstrap_trust_only(true);
     *errOut = [self finalizeBootstrapIfNeeded];
     exec_set_bootstrap_trust_only(false);

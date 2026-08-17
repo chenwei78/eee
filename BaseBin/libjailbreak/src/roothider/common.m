@@ -14,6 +14,7 @@
 #include <xpc/xpc.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <mach-o/dyld.h>
 #include <sys/proc_info.h>
 #include <dispatch/dispatch.h>
@@ -46,6 +47,12 @@ static void roothide_spawn_trace(const char *format, ...)
 
     int trace = open(tracePath, O_WRONLY | O_APPEND);
     if (trace < 0) return;
+
+    struct stat traceStatus = {0};
+    if (fstat(trace, &traceStatus) != 0 || traceStatus.st_size >= 256 * 1024) {
+        close(trace);
+        return;
+    }
 
     char message[900] = {0};
     va_list args;
