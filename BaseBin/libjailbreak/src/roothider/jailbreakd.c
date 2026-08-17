@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <xpc/xpc.h>
 #include <mach/mach.h>
