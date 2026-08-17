@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include "jbserver_global.h"
 
 #include <libjailbreak/libjailbreak.h>
@@ -153,6 +154,19 @@ static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *
     // before clients send it a synchronous patch request.  Returning no port
     // here lets the caller retry without blocking forever on an unready port.
     if (!jailbreakdIsReady()) {
+        int exitStatus = 0;
+        if (jailbreakdConsumeExitStatus(&exitStatus)) {
+            if (WIFEXITED(exitStatus)) {
+                roothide_trace("[launchd] FAILURE: jailbreakd exited before check-in with code %d (raw status %d)", WEXITSTATUS(exitStatus), exitStatus);
+            }
+            else if (WIFSIGNALED(exitStatus)) {
+                roothide_trace("[launchd] FAILURE: jailbreakd terminated before check-in by signal %d (raw status %d)", WTERMSIG(exitStatus), exitStatus);
+            }
+            else {
+                roothide_trace("[launchd] FAILURE: jailbreakd stopped before check-in (raw status %d)", exitStatus);
+            }
+            return -3;
+        }
         roothide_trace("[launchd] jailbreakd is starting; check-in not complete yet");
         return -2;
     }

@@ -1,11 +1,14 @@
 #include <spawn.h>
 #include <unistd.h>
 #include <assert.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <string.h>
 #include <xpc/xpc.h>
 #include <mach/mach.h>
 #include <bsm/libbsm.h>
 #include <sys/param.h>
+#include <sys/wait.h>
 
 #include "../libjailbreak.h"
 #include "jailbreakd.h"
@@ -33,6 +36,10 @@ static bool __firstLoad = false;
 static bool __jailbreakd_initialized = false;
 static volatile bool __jailbreakd_ready = false;
 mach_port_t gJailbreakdPort = MACH_PORT_NULL;
+static pid_t gJailbreakdPid = -1;
+static bool gJailbreakdExitObserved = false;
+static bool gJailbreakdExitConsumed = false;
+static int gJailbreakdExitStatus = 0;
 
 #define JAILBREAKD_CLIENT_PORT_FAST_GET
 
@@ -92,6 +99,28 @@ void setJailbreakdProcess(pid_t pid)
 	char buf[32];
 	snprintf(buf, sizeof(buf), "%d", pid);
 	setenv("JAILBREAKD_PID", buf, 1);
+	gJailbreakdPid = pid;
+	gJailbreakdExitObserved = false;
+	gJailbreakdExitConsumed = false;
+	gJailbreakdExitStatus = 0;
+}
+
+static bool jailbreakdTraceEnvironment(char *environment, size_t environmentSize)
+{
+	int config = open(JBROOT_PATH("/basebin/.roothide_trace_path"), O_RDONLY);
+	if (config < 0) return false;
+
+	char tracePath[PATH_MAX] = {0};
+	ssize_t length = read(config, tracePath, sizeof(tracePath) - 1);
+	close(config);
+	if (length <= 0) return false;
+
+	tracePath[length] = '\0';
+	tracePath[strcspn(tracePath, "\r\n")] = '\0';
+	if (tracePath[0] == '\0') return false;
+
+	int written = snprintf(environment, environmentSize, "ROOTHIDE_JAILBREAKD_TRACE_PATH=%s", tracePath);
+	return written > 0 && (size_t)written < environmentSize;
 }
 
 int spawnJailbreakd()
@@ -124,15 +153,34 @@ int spawnJailbreakd()
 	pid_t pid;
 	posix_spawnattr_t attr = NULL;
 	posix_spawnattr_init(&attr);
+	// firstLoad is now requested from launchd's XPC handler after the injected
+	// constructor has returned.  It is therefore safe to start jailbreakd
+	// suspended, apply the normal RootHide process patch, and then resume it.
+	if (__firstLoad) posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
 	// posix_spawnattr_setspecialport_np(&attr, bootstraport, TASK_BOOTSTRAP_PORT);
 	// posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ bootstraport, MACH_PORT_NULL }, 3);
 	posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ MACH_PORT_NULL, MACH_PORT_NULL, bootstraport }, 3);
-	int ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr, (char*[]){"jailbreakd",NULL}, __firstLoad ? NULL :  ((char*[]){"RESPAWN_REQUIRED=1", NULL}));
+	char traceEnvironment[PATH_MAX + 64] = {0};
+	bool hasTraceEnvironment = jailbreakdTraceEnvironment(traceEnvironment, sizeof(traceEnvironment));
+	char *firstLoadEnvironment[] = { hasTraceEnvironment ? traceEnvironment : NULL, NULL };
+	char *respawnEnvironment[] = { "RESPAWN_REQUIRED=1", hasTraceEnvironment ? traceEnvironment : NULL, NULL };
+	char **environment = __firstLoad ? firstLoadEnvironment : respawnEnvironment;
+	int ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr, (char*[]){"jailbreakd",NULL}, environment);
 	posix_spawnattr_destroy(&attr);
 
 	if (ret != 0) {
 		JBLogError("posix_spawn jailbreakd failed: %d\n", ret);
 		return ret;
+	}
+
+	if (__firstLoad) {
+		int patchResult = unrestrict(pid, roothide_patch_proc, true);
+		if (patchResult != 0) {
+			JBLogError("Failed to patch first-load jailbreakd (%d): %d", pid, patchResult);
+			kill(pid, SIGKILL);
+			waitpid(pid, NULL, 0);
+			return patchResult;
+		}
 	}
 
 	JBLogDebug("jailbreakd spawned, pid=%d\n", pid);
@@ -172,6 +220,23 @@ bool jailbreakdIsInitialized(void)
 bool jailbreakdIsReady(void)
 {
 	return __jailbreakd_ready;
+}
+
+bool jailbreakdConsumeExitStatus(int *statusOut)
+{
+	if (gJailbreakdPid <= 0 || gJailbreakdExitConsumed) return false;
+
+	if (!gJailbreakdExitObserved) {
+		int status = 0;
+		pid_t result = waitpid(gJailbreakdPid, &status, WNOHANG);
+		if (result != gJailbreakdPid) return false;
+		gJailbreakdExitObserved = true;
+		gJailbreakdExitStatus = status;
+	}
+
+	gJailbreakdExitConsumed = true;
+	if (statusOut) *statusOut = gJailbreakdExitStatus;
+	return true;
 }
 
 void jailbreakdSetReady(void)
