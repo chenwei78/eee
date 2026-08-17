@@ -68,7 +68,16 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
 
 static NSString *RootHideLaunchdTracePath(void)
 {
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"];
+    // The jailbreak switches the process to root and changes HOME during
+    // elevatePrivileges.  Resolve this once while the app is still in its
+    // container so every later phase keeps appending to the same file that
+    // the UI can read after a reboot.
+    static NSString *tracePath = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        tracePath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"] copy];
+    });
+    return tracePath;
 }
 
 static void RootHideAppendTrace(NSString *message)
@@ -315,18 +324,21 @@ static void RootHideAppendTrace(NSString *message)
 {
     uint64_t proc = proc_self();
     uint64_t ucred = proc_ucred(proc);
+    RootHideAppendTrace(@"elevate: resolved current proc and ucred");
     
     // Get uid 0
     kwrite32(proc + koffsetof(proc, svuid), 0);
     kwrite32(ucred + koffsetof(ucred, svuid), 0);
     kwrite32(ucred + koffsetof(ucred, ruid), 0);
     kwrite32(ucred + koffsetof(ucred, uid), 0);
+    RootHideAppendTrace(@"elevate: uid fields written");
     
     // Get gid 0
     kwrite32(proc + koffsetof(proc, svgid), 0);
     kwrite32(ucred + koffsetof(ucred, rgid), 0);
     kwrite32(ucred + koffsetof(ucred, svgid), 0);
     kwrite32(ucred + koffsetof(ucred, groups), 0);
+    RootHideAppendTrace(@"elevate: gid fields written");
     
     // Add P_SUGID
     uint32_t flag = kread32(proc + koffsetof(proc, flag));
@@ -334,19 +346,24 @@ static void RootHideAppendTrace(NSString *message)
         flag &= P_SUGID;
         kwrite32(proc + koffsetof(proc, flag), flag);
     }
+    RootHideAppendTrace(@"elevate: process flags updated");
     
     if (getuid() != 0) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedGetRoot userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to get root, uid still %d", getuid()]}];
     if (getgid() != 0) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedGetRoot userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to get root, gid still %d", getgid()]}];
+    RootHideAppendTrace(@"elevate: uid and gid verified as root");
     
     // Unsandbox
     uint64_t label = kread_ptr(ucred + koffsetof(ucred, label));
     mac_label_set(label, 1, -1);
+    RootHideAppendTrace(@"elevate: sandbox label cleared");
     NSError *error = nil;
     [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/var" error:&error];
     if (error) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedUnsandbox userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to unsandbox, /var does not seem accessible (%s)", error.description.UTF8String]}];
+    RootHideAppendTrace(@"elevate: /var access verified");
     setenv("HOME", "/var/root", true);
     setenv("CFFIXED_USER_HOME", "/var/root", true);
     setenv("TMPDIR", "/var/tmp", true);
+    RootHideAppendTrace(@"elevate: root environment configured");
     
     // FUCKING dirhelper caches the temporary path
     // So we have to do userland patchfinding to find the fucking string and overwrite it
@@ -371,16 +388,20 @@ static void RootHideAppendTrace(NSString *message)
     
     // Get CS_PLATFORM_BINARY
     proc_csflags_set(proc, CS_PLATFORM_BINARY);
+    RootHideAppendTrace(@"elevate: requested CS_PLATFORM_BINARY");
     uint32_t csflags;
     csops(getpid(), CS_OPS_STATUS, &csflags, sizeof(csflags));
     if (!(csflags & CS_PLATFORM_BINARY)) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedPlatformize userInfo:@{NSLocalizedDescriptionKey:@"Failed to get CS_PLATFORM_BINARY"}];
+    RootHideAppendTrace(@"elevate: CS_PLATFORM_BINARY verified");
 
     // RootHide's launchd/jailbreakd path requires the installer bit while
     // it is preparing the randomized jbroot.
     proc_csflags_set(proc, CS_INSTALLER);
+    RootHideAppendTrace(@"elevate: requested CS_INSTALLER");
     if (otherJailbreakActived(true)) {
         return [NSError errorWithDomain:@"RootHide" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Another jailbreak is active; reboot the device before continuing."}];
     }
+    RootHideAppendTrace(@"elevate: no other jailbreak is active");
     
     return nil;
 }

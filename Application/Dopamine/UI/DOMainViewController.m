@@ -208,6 +208,9 @@
     if ([trace containsString:@"phase: building physical read/write primitive"] && ![trace containsString:@"phase complete: building physical read/write primitive"]) {
         return @"诊断结论：漏洞已获取，但卡在构建内核读写原语阶段。";
     }
+    if ([trace containsString:@"phase: elevating privileges"] && ![trace containsString:@"phase complete: elevating privileges"]) {
+        return @"诊断结论：停在提权阶段；以最后一条 elevate: 日志为准。";
+    }
     if ([trace containsString:@"phase: preparing RootHide bootstrap"] && ![trace containsString:@"phase complete: preparing RootHide bootstrap"]) {
         return @"诊断结论：卡在 RootHide Bootstrap 文件准备阶段，尚未进入 BaseBin TrustCache 或 launchd 注入。";
     }
