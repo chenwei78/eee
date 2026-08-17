@@ -11,6 +11,7 @@
 #include <bsm/libbsm.h>
 #include <sys/param.h>
 #include <sys/proc.h>
+#include <sys/proc_info.h>
 #include <sys/wait.h>
 
 #include "../libjailbreak.h"
