@@ -746,7 +746,10 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
         argc++;
     }
 
-    bool need_patch_child = exec_patch_enabled && !exec_bootstrap_trust_only;
+    // The initial Bootstrap shell and everything it launches must use the
+    // same trust-only path until userspace reboot makes jailbreakd available.
+    bool bootstrap_trust_only = exec_bootstrap_trust_only || getenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY") != NULL;
+    bool need_patch_child = exec_patch_enabled && !bootstrap_trust_only;
     if(dlopen("systemhook.dylib", RTLD_NOLOAD)) {
     /* if systemhook has been loaded into the current process, 
         it means posix_spawn has been hooked and we can skip patching. */
@@ -760,8 +763,8 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     posix_spawnattr_getflags(attrp, &flags);
     bool should_resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
 
-    bool need_recursive_trust = need_patch_child || exec_bootstrap_trust_only;
-    roothide_spawn_trace("begin path=%s argc=%d exec_patch=%d trust_only=%d patch_child=%d resume=%d", path ?: "(null)", argc, exec_patch_enabled, exec_bootstrap_trust_only, need_patch_child, should_resume);
+    bool need_recursive_trust = need_patch_child || bootstrap_trust_only;
+    roothide_spawn_trace("begin path=%s argc=%d exec_patch=%d trust_only=%d patch_child=%d resume=%d", path ?: "(null)", argc, exec_patch_enabled, bootstrap_trust_only, need_patch_child, should_resume);
 
     if(need_recursive_trust && !dyld_patch_enabled()) {
         roothide_spawn_trace("trusting executable recursively: %s", path ?: "(null)");

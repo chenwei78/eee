@@ -850,6 +850,11 @@ static NSError *rootHideError(NSInteger code, NSString *message)
     NSString *prepScript = rootHideJbrootPath(@"/prep_bootstrap.sh");
     if ([NSFileManager.defaultManager fileExistsAtPath:prepScript]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing RootHide Bootstrap" debug:NO];
+        NSString *staleShellsTemp = rootHideJbrootPath(@"/etc/shells.tmp");
+        if ([[NSFileManager defaultManager] fileExistsAtPath:staleShellsTemp]) {
+            [[NSFileManager defaultManager] removeItemAtPath:staleShellsTemp error:nil];
+            RootHideAppendBootstrapTrace(@"removed stale /etc/shells.tmp from an interrupted Bootstrap");
+        }
         RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (script output is capped)");
         int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, "/prep_bootstrap.sh", NULL);
         if (r != 0) {

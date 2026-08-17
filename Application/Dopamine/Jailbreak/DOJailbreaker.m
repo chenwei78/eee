@@ -845,9 +845,11 @@ void *boomerang_server(struct boomerang_info *info)
     // SpringBoard cannot show the terminal-password prompt during the first
     // Bootstrap.  Avoid the prep script retrying a killed uialert forever.
     setenv("NO_PASSWORD_PROMPT", "1", 1);
+    setenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY", "1", 1);
     exec_set_bootstrap_trust_only(true);
     *errOut = [self finalizeBootstrapIfNeeded];
     exec_set_bootstrap_trust_only(false);
+    unsetenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY");
     if (*errOut) {
         RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: finalizing RootHide bootstrap: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
