@@ -716,9 +716,15 @@ void launchd_panic(const char* fmt, ...)
 }
 
 static bool exec_patch_enabled = true;
+static bool exec_bootstrap_trust_only = false;
 void exec_set_patch(bool enabled)
 {
 	exec_patch_enabled = enabled;
+}
+
+void exec_set_bootstrap_trust_only(bool enabled)
+{
+    exec_bootstrap_trust_only = enabled;
 }
 int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])
 {
@@ -733,7 +739,7 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
         argc++;
     }
 
-    bool need_patch_child = exec_patch_enabled;
+    bool need_patch_child = exec_patch_enabled && !exec_bootstrap_trust_only;
     if(dlopen("systemhook.dylib", RTLD_NOLOAD)) {
     /* if systemhook has been loaded into the current process, 
         it means posix_spawn has been hooked and we can skip patching. */
@@ -747,9 +753,10 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     posix_spawnattr_getflags(attrp, &flags);
     bool should_resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
 
-    roothide_spawn_trace("begin path=%s argc=%d exec_patch=%d patch_child=%d resume=%d", path ?: "(null)", argc, exec_patch_enabled, need_patch_child, should_resume);
+    bool need_recursive_trust = need_patch_child || exec_bootstrap_trust_only;
+    roothide_spawn_trace("begin path=%s argc=%d exec_patch=%d trust_only=%d patch_child=%d resume=%d", path ?: "(null)", argc, exec_patch_enabled, exec_bootstrap_trust_only, need_patch_child, should_resume);
 
-    if(need_patch_child && !dyld_patch_enabled()) {
+    if(need_recursive_trust && !dyld_patch_enabled()) {
         roothide_spawn_trace("trusting executable recursively: %s", path ?: "(null)");
         int trustResult = jbclient_trust_executable_recurse(path, NULL);
         roothide_spawn_trace("recursive trust returned %d for %s", trustResult, path ?: "(null)");
