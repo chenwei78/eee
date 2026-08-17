@@ -803,19 +803,25 @@ void *boomerang_server(struct boomerang_info *info)
     }
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing RootHide") debug:NO];
+    RootHideAppendTrace(@"phase: generating RootHide dyld environment");
     int rootHideResult = basebin_generate(false);
     if (rootHideResult != 0) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: generating RootHide dyld environment returned %d", rootHideResult]);
         *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Creating RootHide dyld environment failed: %d", rootHideResult]}];
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: generating RootHide dyld environment");
 
+    RootHideAppendTrace(@"phase: uploading RootHide dyld trust cache");
     rootHideResult = ensure_dyld_trustcache(JBROOT_PATH("/basebin/.fakelib/dyld"));
     if (rootHideResult != 0) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: uploading RootHide dyld trust cache returned %d", rootHideResult]);
         *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Uploading dyld trustcache failed: %d", rootHideResult]}];
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: uploading RootHide dyld trust cache");
 
     // launchdhook is now live; enable child patching and use the stock path
     // while the first userspace reboot is being prepared.
@@ -823,21 +829,32 @@ void *boomerang_server(struct boomerang_info *info)
     setenv("DYLD_IN_CACHE", "0", 1);
     setenv("DISABLE_TWEAKS", "1", 1);
     setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/systemhook.dylib"), 1);
+    RootHideAppendTrace(@"phase complete: enabled RootHide child patching");
     
     // Unsandbox iconservicesagent so that app icons can work
     exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
     
+    RootHideAppendTrace(@"phase: finalizing RootHide bootstrap");
     *errOut = [self finalizeBootstrapIfNeeded];
     if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: finalizing RootHide bootstrap: %@", (*errOut).localizedDescription]);
         [self cleanUpPostExploitation];
         return;
     }
+    RootHideAppendTrace(@"phase complete: finalizing RootHide bootstrap");
     
     [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
+    RootHideAppendTrace(@"phase complete: configured RootHide services");
     
     // RootHide's randomized jbroot is intentionally outside the rootless
     // app path, so the rootless duplicate-app check is not applicable here.
+    RootHideAppendTrace(@"phase: final jailbreak cleanup");
     *errOut = [self cleanUpPostExploitation];
+    if (*errOut) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: final jailbreak cleanup: %@", (*errOut).localizedDescription]);
+        return;
+    }
+    RootHideAppendTrace(@"phase complete: jailbreak setup; userspace reboot requested next");
 
 
     //printf("Starting launch daemons...\n");
@@ -853,6 +870,7 @@ void *boomerang_server(struct boomerang_info *info)
 - (void)finalize
 {
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
+    RootHideAppendTrace(@"phase: invoking userspace reboot");
     [[DOEnvironmentManager sharedManager] rebootUserspace];
 }
 
