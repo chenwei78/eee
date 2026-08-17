@@ -270,6 +270,45 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
     if ([trace containsString:@"FAILURE: jailbreakd initialization returned"]) {
         return @"诊断结论：RootHide jailbreakd 启动失败，返回码见上一行。";
     }
+    if ([trace containsString:@"[jailbreakd] phase: initializing jailbreak primitives"] &&
+        ![trace containsString:@"[jailbreakd] jailbreak primitive initialization returned"]) {
+        if ([trace containsString:@"[primitive] requesting system information from launchd"] &&
+            ![trace containsString:@"[primitive] system information request returned"]) {
+            return @"诊断结论：临时 jailbreakd 已启动，但向 launchd 请求系统信息的 XPC 调用没有返回。";
+        }
+        if ([trace containsString:@"[primitive] requesting PTE physrw handoff from launchd"] &&
+            ![trace containsString:@"[primitive] physrw handoff returned"]) {
+            return @"诊断结论：系统信息已收到，但 launchd 在为临时 jailbreakd 建立 PTE 内核读写窗口时没有返回。";
+        }
+        if ([trace containsString:@"[primitive] requesting full physrw handoff from launchd"] &&
+            ![trace containsString:@"[primitive] physrw handoff returned"]) {
+            return @"诊断结论：系统信息已收到，但 launchd 卡在完整物理内存映射；iOS 18 首次启动应使用 PTE handoff。";
+        }
+        if ([trace containsString:@"[primitive] physrw handoff returned 0"] &&
+            ![trace containsString:@"[primitive] local physrw initialization returned"]) {
+            return @"诊断结论：内核读写映射已经交接，但 jailbreakd 未完成本地 primitive 安装。";
+        }
+        if ([trace containsString:@"[primitive] initializing address translation"] &&
+            ![trace containsString:@"[primitive] address translation initialized"]) {
+            return @"诊断结论：PTE/physrw 已安装，但 jailbreakd 卡在内核地址转换初始化。";
+        }
+        if ([trace containsString:@"[primitive] address translation initialized; initializing IOSurface primitives"] &&
+            ![trace containsString:@"[primitive] IOSurface primitives initialized"]) {
+            return @"诊断结论：PTE/physrw 已可用，但 jailbreakd 卡在 IOSurface primitive 初始化。";
+        }
+        if ([trace containsString:@"[primitive] initializing Fugu14 kcall"] &&
+            ![trace containsString:@"[primitive] Fugu14 kcall initialization returned"]) {
+            return @"诊断结论：物理读写与 IOSurface 已可用，但 jailbreakd 卡在 Fugu14 kcall 初始化。";
+        }
+        if ([trace containsString:@"[primitive] initializing arm64 kcall"] &&
+            ![trace containsString:@"[primitive] arm64 kcall initialization returned"]) {
+            return @"诊断结论：物理读写与 IOSurface 已可用，但 jailbreakd 卡在 arm64 kcall 初始化。";
+        }
+        if ([trace containsString:@"[primitive] primitive initialization complete"]) {
+            return @"诊断结论：内核原语内部初始化已完成，但控制流没有返回 jailbreakd 主启动函数。";
+        }
+        return @"诊断结论：临时 jailbreakd 已启动，但内核原语初始化没有返回；以最后一条 primitive 日志为准。";
+    }
     if ([trace containsString:@"phase: RootHide post-initialization"] && ![trace containsString:@"phase complete: RootHide post-initialization"]) {
         return @"诊断结论：Dopamine 原生 launchd hook 已完成；失败发生在 RootHide 服务初始化。";
     }

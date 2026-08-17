@@ -119,9 +119,15 @@ int main(int argc, char* argv[])
 		}
 
 		JBLogDebug("start initializing jb primitives");
-		RootHideJailbreakdTrace("phase: initializing jailbreak primitives");
+		// During the first live injection launchd itself only has the bounded
+		// physrw PTE window.  Asking it to build a full physical-memory mapping
+		// for this temporary Bootstrap helper can stall inside pmap_map_in on
+		// iOS 18.  Keep the helper on the same PTE primitive; after the userspace
+		// reboot the permanent jailbreakd still receives full physrw.
+		bool usePhysrwPTE = firstLiveInjection;
+		RootHideJailbreakdTrace("phase: initializing jailbreak primitives; physrwPTE=%d", usePhysrwPTE);
 		jbclient_xpc_set_custom_port(bootstraport);
-		int ret = jbclient_initialize_primitives();
+		int ret = jbclient_initialize_primitives_internal(usePhysrwPTE);
 		JBLogDebug("jbclient_initialize_primitives ret: %d", ret);
 		RootHideJailbreakdTrace("jailbreak primitive initialization returned %d", ret);
 		if(ret != 0) {
