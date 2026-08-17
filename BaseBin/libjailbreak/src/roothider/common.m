@@ -776,9 +776,14 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     {
         if(need_patch_child) {
             // will fail before launchdhook injected and dyld patched, eg: opainject...
-            roothide_spawn_trace("requesting jailbreakd child patch pid=%d resume=%d", pid, should_resume);
-            int patchResult = jbdSpawnPatchChild(pid, should_resume);
-            roothide_spawn_trace("jailbreakd child patch returned %d for pid=%d", patchResult, pid);
+            int patchResult = -1;
+            for (int attempt = 1; attempt <= 100; attempt++) {
+                roothide_spawn_trace("requesting jailbreakd child patch pid=%d resume=%d attempt=%d", pid, should_resume, attempt);
+                patchResult = jbdSpawnPatchChild(pid, should_resume);
+                roothide_spawn_trace("jailbreakd child patch returned %d for pid=%d attempt=%d", patchResult, pid, attempt);
+                if (patchResult == 0) break;
+                usleep(50000);
+            }
             if(patchResult != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
                 //jailbreak internal spawn, just let it hang forever so that we could get a panic log

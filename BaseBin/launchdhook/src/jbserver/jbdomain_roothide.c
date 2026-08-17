@@ -142,11 +142,19 @@ static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *
 	// This XPC handler only runs after the constructor returned and launchd's
 	// normal threads have resumed; it is therefore the safe point to start it.
     roothide_trace("[launchd] jailbreakd lookup from pid=%d; initialized=%d", audit_token_to_pid(*callerToken), jailbreakdIsInitialized());
-    if (!jailbreakdIsInitialized()) {
+	if (!jailbreakdIsInitialized()) {
         roothide_trace("[launchd] starting deferred jailbreakd");
         int initResult = initJailbreakd(true);
         roothide_trace("[launchd] deferred jailbreakd start returned %d", initResult);
         if (initResult != 0) return -1;
+    }
+
+    // A newly spawned jailbreakd has to check in and receive its server port
+    // before clients send it a synchronous patch request.  Returning no port
+    // here lets the caller retry without blocking forever on an unready port.
+    if (!jailbreakdIsReady()) {
+        roothide_trace("[launchd] jailbreakd is starting; check-in not complete yet");
+        return -2;
     }
 
     mach_port_t port = jailbreakdClientPort();
@@ -167,6 +175,8 @@ static int roothide_jailbreakd_checkin(audit_token_t *callerToken, xpc_object_t 
 	if(uid != 0) return -1;
 
 	setJailbreakdProcess(pid);
+	jailbreakdSetReady();
+	roothide_trace("[launchd] jailbreakd checked in from pid=%d", pid);
 
 	*portOut = xpc_mach_recv_create(jailbreakdServerPort());
 	return 0;

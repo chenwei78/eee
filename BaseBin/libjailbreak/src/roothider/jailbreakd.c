@@ -31,6 +31,7 @@ int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 
 static bool __firstLoad = false;
 static bool __jailbreakd_initialized = false;
+static volatile bool __jailbreakd_ready = false;
 mach_port_t gJailbreakdPort = MACH_PORT_NULL;
 
 #define JAILBREAKD_CLIENT_PORT_FAST_GET
@@ -150,6 +151,7 @@ int initJailbreakd(bool firstLoad)
 	assert(__jailbreakd_initialized == false);
 
 	__firstLoad = firstLoad;
+	__jailbreakd_ready = false;
 
 	if(registerServerPort() != 0) {
 		JBLogError("registerServerPort failed");
@@ -157,13 +159,24 @@ int initJailbreakd(bool firstLoad)
 	}
 
 	__jailbreakd_initialized = true;
-
-	return spawnJailbreakd();
+	int spawnResult = spawnJailbreakd();
+	if (spawnResult != 0) __jailbreakd_initialized = false;
+	return spawnResult;
 }
 
 bool jailbreakdIsInitialized(void)
 {
 	return __jailbreakd_initialized;
+}
+
+bool jailbreakdIsReady(void)
+{
+	return __jailbreakd_ready;
+}
+
+void jailbreakdSetReady(void)
+{
+	__jailbreakd_ready = true;
 }
 
 mach_port_t reactiveJailbreakdPort()

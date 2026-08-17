@@ -18,6 +18,8 @@ void enableJBDLog(void* debugLog, void* errorLog);
 
 int initJailbreakd(bool firstLoad);
 bool jailbreakdIsInitialized(void);
+bool jailbreakdIsReady(void);
+void jailbreakdSetReady(void);
 
 void setJailbreakdProcess(pid_t pid);
 
