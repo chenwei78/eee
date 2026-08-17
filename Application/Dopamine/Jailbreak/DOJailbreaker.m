@@ -831,8 +831,10 @@ void *boomerang_server(struct boomerang_info *info)
     setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/systemhook.dylib"), 1);
     RootHideAppendTrace(@"phase complete: enabled RootHide child patching");
     
-    // Unsandbox iconservicesagent so that app icons can work
-    exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
+    // iconservicesagent is restarted by the imminent userspace reboot.  Running
+    // killall here would spawn the first child after RootHide patching is enabled,
+    // which can block before the RootHide bootstrap finalizer is reached.
+    RootHideAppendTrace(@"phase complete: deferred iconservicesagent restart until userspace reboot");
     
     RootHideAppendTrace(@"phase: finalizing RootHide bootstrap");
     *errOut = [self finalizeBootstrapIfNeeded];
