@@ -100,14 +100,20 @@ __attribute__((constructor)) static void initializer(void)
 	}
 	roothide_trace_init();
 	roothide_trace("[launchd] constructor entered; DOPAMINE_INITIALIZED=%d", getenv("DOPAMINE_INITIALIZED") != NULL);
-	// During the first live injection opainject has suspended launchd's
-	// existing threads.  The RootHide crash reporter creates its own exception
-	// thread, so start it only after the subsequent userspace reboot.  Initialize
-	// tracing first so an iOS-version-specific failure here remains visible.
+	// Dopamine 3's modern crash reporter is intentionally a no-op on iOS 17+.
+	// The RootHide compatibility library exports the same API but its older
+	// implementation installs exception ports and signal handlers; invoking it
+	// in PID 1 terminates launchd on iOS 18.  Preserve crash reporting only on
+	// the older systems where the implementation is supported.
 	if (getenv("DOPAMINE_INITIALIZED") != 0) {
-		roothide_trace("[launchd] phase: starting post-reboot crash reporter");
-		crashreporter_start();
-		roothide_trace("[launchd] phase complete: post-reboot crash reporter");
+		if (@available(iOS 17.0, *)) {
+			roothide_trace("[launchd] phase skipped: post-reboot crash reporter disabled on iOS 17+");
+		}
+		else {
+			roothide_trace("[launchd] phase: starting post-reboot crash reporter");
+			crashreporter_start();
+			roothide_trace("[launchd] phase complete: post-reboot crash reporter");
+		}
 	}
 	roothide_trace("[launchd] phase: RootHide pre-initialization");
 	roothide_launchd_preinit();
