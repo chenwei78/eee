@@ -10,6 +10,7 @@
 #import "DOExploitManager.h"
 #import "DOUIManager.h"
 #import "DOPreferenceManager.h"
+#import <errno.h>
 #import <sys/stat.h>
 #import <compression.h>
 #import <xpf/xpf.h>
@@ -102,7 +103,7 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
     // Keep polling until jailbreakd has checked in and launchd returns a
     // usable client port.  This avoids sending a synchronous patch request to
     // a port whose server is not ready yet.
-    for (int attempt = 1; attempt <= 100; attempt++) {
+    for (int attempt = 1; attempt <= 200; attempt++) {
         mach_port_t port = jbclient_jailbreakd_lookup();
         if (MACH_PORT_VALID(port)) {
             mach_port_deallocate(mach_task_self(), port);
@@ -465,72 +466,113 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
     return nil;
 }
 
-struct boomerang_info {
-    mach_port_t serverPort;
-    dispatch_semaphore_t boomerangDone;
-};
-
-void *boomerang_server(struct boomerang_info *info)
-{
-    while (true) {
-        xpc_object_t xdict = nil;
-        if (!xpc_pipe_receive(info->serverPort, &xdict)) {
-            if (jbserver_received_boomerang_xpc_message(&gBoomerangServer, xdict) == JBS_BOOMERANG_DONE) {
-                dispatch_semaphore_signal(info->boomerangDone);
-                break;
-            }
-        }
-    }
-    return NULL;
-}
-
 - (NSError *)injectLaunchdHook
 {
     // Host a boomerang server that will be used by launchdhook to get the jailbreak primitives from this app
     mach_port_t serverPort = MACH_PORT_NULL;
-    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &serverPort);
-    mach_port_insert_right(mach_task_self(), serverPort, serverPort, MACH_MSG_TYPE_MAKE_SEND);
-    
-    struct boomerang_info info;
-    info.serverPort = serverPort;
-    info.boomerangDone = dispatch_semaphore_create(0);
-    
-    pthread_t boomerangThread;
-    pthread_create(&boomerangThread, NULL, (void *(*)(void *))boomerang_server, &info);
-    pthread_detach(boomerangThread);
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &serverPort);
+    if (kr != KERN_SUCCESS) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: allocating primitive-handoff port returned %x", kr]);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Allocating the primitive-handoff port failed: %x", kr]}];
+    }
+    kr = mach_port_insert_right(mach_task_self(), serverPort, serverPort, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: inserting primitive-handoff send right returned %x", kr]);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Inserting the primitive-handoff send right failed: %x", kr]}];
+    }
 
     // Stash port to server in launchd's initPorts[2]
     // Since we don't have the neccessary entitlements, we need to do it over jbctl
     posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){MACH_PORT_NULL, MACH_PORT_NULL, serverPort}, 3);
+    int attrResult = posix_spawnattr_init(&attr);
+    if (attrResult != 0) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Initializing launchd port attributes failed: %d", attrResult]}];
+    }
+    attrResult = posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){MACH_PORT_NULL, MACH_PORT_NULL, serverPort}, 3);
+    if (attrResult != 0) {
+        posix_spawnattr_destroy(&attr);
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Registering the launchd handoff port failed: %d", attrResult]}];
+    }
     pid_t spawnedPid = 0;
     const char *jbctlPath = JBROOT_PATH("/basebin/jbctl");
     int spawnError = posix_spawn(&spawnedPid, jbctlPath, NULL, &attr, (char *const *)(const char *[]){ jbctlPath, "internal", "launchd_stash_port", NULL }, NULL);
+    posix_spawnattr_destroy(&attr);
     if (spawnError != 0) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: spawning launchd port-stash helper returned %d", spawnError]);
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Spawning jbctl failed with error code %d", spawnError]}];
     }
-    posix_spawnattr_destroy(&attr);
+
     int status = 0;
+    pid_t waitResult;
     do {
-        if (waitpid(spawnedPid, &status, 0) == -1) {
-            return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"Waiting for jbctl failed"}];
-        }
-    } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        waitResult = waitpid(spawnedPid, &status, 0);
+    } while (waitResult < 0 && errno == EINTR);
+    if (waitResult != spawnedPid) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: waiting for launchd port-stash helper returned errno=%d", errno]);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"Waiting for jbctl failed"}];
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: launchd port-stash helper ended with raw status %d", status]);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Stashing the launchd handoff port failed with status %d", status]}];
+    }
     RootHideAppendTrace(@"phase complete: launchd primitive port stashed");
+
+    dispatch_semaphore_t boomerangDone = dispatch_semaphore_create(0);
+    __block int boomerangReceiveError = 0;
+    dispatch_source_t boomerangSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)serverPort, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+    if (!boomerangSource) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        RootHideAppendTrace(@"FAILURE: creating primitive-handoff dispatch source");
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"Creating the primitive-handoff server failed"}];
+    }
+    dispatch_source_set_event_handler(boomerangSource, ^{
+        xpc_object_t xdict = nil;
+        int receiveError = xpc_pipe_receive(serverPort, &xdict);
+        if (receiveError != 0) {
+            boomerangReceiveError = receiveError;
+            dispatch_semaphore_signal(boomerangDone);
+            return;
+        }
+        int messageResult = jbserver_received_boomerang_xpc_message(&gBoomerangServer, xdict);
+        if (xdict) xpc_release(xdict);
+        if (messageResult == JBS_BOOMERANG_DONE) {
+            dispatch_semaphore_signal(boomerangDone);
+        }
+    });
+    dispatch_source_set_cancel_handler(boomerangSource, ^{
+        mach_port_destroy(mach_task_self(), serverPort);
+    });
+    dispatch_resume(boomerangSource);
 
     // Inject launchdhook.dylib into launchd via opainject
     RootHideAppendTrace(@"phase: invoking opainject for launchd (PID 1)");
     int r = exec_cmd(JBROOT_PATH("/basebin/opainject"), "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
     if (r != 0) {
+        dispatch_source_cancel(boomerangSource);
         RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: opainject returned %d", r]);
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"opainject failed with error code %d", r]}];
     }
     RootHideAppendTrace(@"phase complete: opainject returned; waiting for primitive-handoff acknowledgement");
 
-    // Wait for everything to finish
-    dispatch_semaphore_wait(info.boomerangDone, DISPATCH_TIME_FOREVER);
-    mach_port_deallocate(mach_task_self(), serverPort);
+    // opainject only returns after launchdhook's constructor has finished, so
+    // the acknowledgement should already be queued.  Keep a bounded wait to
+    // turn a broken handoff into a useful error instead of freezing the app.
+    long handoffWait = dispatch_semaphore_wait(boomerangDone, dispatch_time(DISPATCH_TIME_NOW, 10ull * NSEC_PER_SEC));
+    dispatch_source_cancel(boomerangSource);
+    if (handoffWait != 0) {
+        RootHideAppendTrace(@"FAILURE: primitive-handoff acknowledgement timed out after 10 seconds");
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"Timed out waiting for launchd to acknowledge the primitive handoff"}];
+    }
+    if (boomerangReceiveError != 0) {
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: primitive-handoff server receive returned %d", boomerangReceiveError]);
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"The primitive-handoff server failed: %d", boomerangReceiveError]}];
+    }
     RootHideAppendTrace(@"phase complete: launchd primitive-handoff acknowledgement received");
 
     return nil;
@@ -864,7 +906,7 @@ void *boomerang_server(struct boomerang_info *info)
     // trusting the outer /bin/sh process.
     RootHideAppendTrace(@"phase: starting deferred jailbreakd for Bootstrap child patching");
     if (!RootHideWaitForDeferredJailbreakd()) {
-        RootHideAppendTrace(@"FAILURE: deferred jailbreakd did not become ready within 5 seconds");
+        RootHideAppendTrace(@"FAILURE: deferred jailbreakd did not become ready within 10 seconds");
         *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey : @"RootHide jailbreakd did not become ready for Bootstrap"}];
         [self cleanUpPostExploitation];
         return;
@@ -875,9 +917,15 @@ void *boomerang_server(struct boomerang_info *info)
     // SpringBoard cannot show the terminal-password prompt during the first
     // Bootstrap.  Avoid the prep script retrying a killed uialert forever.
     setenv("NO_PASSWORD_PROMPT", "1", 1);
+    // systemhook normally trusts only the immediate executable.  During the
+    // first Bootstrap, trust each launched executable together with its Mach-O
+    // dependencies because the package tree has not gone through a normal
+    // post-reboot launch yet.
+    setenv("ROOTHIDE_BOOTSTRAP_RECURSIVE_TRUST", "1", 1);
     unsetenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY");
     exec_set_bootstrap_trust_only(false);
     *errOut = [self finalizeBootstrapIfNeeded];
+    unsetenv("ROOTHIDE_BOOTSTRAP_RECURSIVE_TRUST");
     unsetenv("NO_PASSWORD_PROMPT");
     if (*errOut) {
         RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: finalizing RootHide bootstrap: %@", (*errOut).localizedDescription]);

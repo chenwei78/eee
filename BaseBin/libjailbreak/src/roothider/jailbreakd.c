@@ -5,10 +5,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <libproc.h>
 #include <xpc/xpc.h>
 #include <mach/mach.h>
 #include <bsm/libbsm.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/wait.h>
 
 #include "../libjailbreak.h"
@@ -50,22 +52,33 @@ int registerServerPort()
 
 	// deallocate the previous port if it exists
 	if(MACH_PORT_VALID(gJailbreakdPort)) {
-		mach_port_deallocate(mach_task_self(), gJailbreakdPort);
+		mach_port_destroy(mach_task_self(), gJailbreakdPort);
 		gJailbreakdPort = MACH_PORT_NULL;
 	}
 
-	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &gJailbreakdPort);
-	mach_port_insert_right(mach_task_self(), gJailbreakdPort, gJailbreakdPort, MACH_MSG_TYPE_MAKE_SEND);
+	kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &gJailbreakdPort);
+	if (kr != KERN_SUCCESS) return -1;
+	kr = mach_port_insert_right(mach_task_self(), gJailbreakdPort, gJailbreakdPort, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		mach_port_destroy(mach_task_self(), gJailbreakdPort);
+		gJailbreakdPort = MACH_PORT_NULL;
+		return -1;
+	}
 
 	JBLogDebug("jailbreakd server port: %x", gJailbreakdPort);
 
 #ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
 	mach_port_t self_host = mach_host_self();
-	kern_return_t kr = host_set_special_port(self_host, HOST_LAUNCHCTL_PORT, gJailbreakdPort);
+	kr = host_set_special_port(self_host, HOST_LAUNCHCTL_PORT, gJailbreakdPort);
 	mach_port_deallocate(mach_task_self(), self_host);
 #endif
+	if (kr != KERN_SUCCESS) {
+		mach_port_destroy(mach_task_self(), gJailbreakdPort);
+		gJailbreakdPort = MACH_PORT_NULL;
+		return -1;
+	}
 
-	return kr==KERN_SUCCESS ? 0 : -1;
+	return 0;
 }
 
 #ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
@@ -92,7 +105,17 @@ void setJailbreakdProcess(pid_t pid)
 		pid_t oldpid = atoi(pidenv);
 		if(oldpid != pid)
 		{
-			waitpid(oldpid, NULL, 0);
+			int oldStatus = 0;
+			pid_t waitResult = waitpid(oldpid, &oldStatus, WNOHANG);
+			if (waitResult == 0) {
+				char oldPath[PATH_MAX] = {0};
+				if (proc_get_ppid(oldpid) == 1 &&
+					proc_get_path(oldpid, oldPath) &&
+					roothide_string_has_suffix(oldPath, "/basebin/jailbreakd")) {
+					kill(oldpid, SIGKILL);
+					waitpid(oldpid, NULL, 0);
+				}
+			}
 			unsetenv("JAILBREAKD_PID");
 		}
 	}
@@ -129,15 +152,32 @@ int spawnJailbreakd()
 	assert(getpid() == 1);
 
 	static mach_port_t bootstraport = MACH_PORT_NULL;
+	static int bootstrapPortResult = 0;
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-		mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &bootstraport);
-		mach_port_insert_right(mach_task_self(), bootstraport, bootstraport, MACH_MSG_TYPE_MAKE_SEND);
+		kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &bootstraport);
+		if (kr != KERN_SUCCESS) {
+			bootstrapPortResult = -1;
+			return;
+		}
+		kr = mach_port_insert_right(mach_task_self(), bootstraport, bootstraport, MACH_MSG_TYPE_MAKE_SEND);
+		if (kr != KERN_SUCCESS) {
+			mach_port_destroy(mach_task_self(), bootstraport);
+			bootstraport = MACH_PORT_NULL;
+			bootstrapPortResult = -2;
+			return;
+		}
 		JBLogDebug("jailbreakd bootstrap port: %x", bootstraport);
 
 		static dispatch_source_t source; //retain the dispatch source
 		source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)bootstraport, 0, dispatch_get_global_queue(0,0));
+		if (!source) {
+			mach_port_destroy(mach_task_self(), bootstraport);
+			bootstraport = MACH_PORT_NULL;
+			bootstrapPortResult = -3;
+			return;
+		}
 		dispatch_source_set_event_handler(source, ^{
 			JBLogDebug("received message from jailbreakd");
 			xpc_object_t xdict = NULL;
@@ -150,23 +190,35 @@ int spawnJailbreakd()
 		});
 		dispatch_resume(source);
 	});
+	if (bootstrapPortResult != 0) return bootstrapPortResult;
 
 	pid_t pid;
 	posix_spawnattr_t attr = NULL;
-	posix_spawnattr_init(&attr);
+	int ret = posix_spawnattr_init(&attr);
+	if (ret != 0) return ret;
 	// firstLoad is now requested from launchd's XPC handler after the injected
 	// constructor has returned.  It is therefore safe to start jailbreakd
 	// suspended, apply the normal RootHide process patch, and then resume it.
-	if (__firstLoad) posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
+	if (__firstLoad) {
+		ret = posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
+		if (ret != 0) {
+			posix_spawnattr_destroy(&attr);
+			return ret;
+		}
+	}
 	// posix_spawnattr_setspecialport_np(&attr, bootstraport, TASK_BOOTSTRAP_PORT);
 	// posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ bootstraport, MACH_PORT_NULL }, 3);
-	posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ MACH_PORT_NULL, MACH_PORT_NULL, bootstraport }, 3);
+	ret = posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ MACH_PORT_NULL, MACH_PORT_NULL, bootstraport }, 3);
+	if (ret != 0) {
+		posix_spawnattr_destroy(&attr);
+		return ret;
+	}
 	char traceEnvironment[PATH_MAX + 64] = {0};
 	bool hasTraceEnvironment = jailbreakdTraceEnvironment(traceEnvironment, sizeof(traceEnvironment));
-	char *firstLoadEnvironment[] = { hasTraceEnvironment ? traceEnvironment : NULL, NULL };
+	char *firstLoadEnvironment[] = { "ROOTHIDE_JAILBREAKD_FIRST_LOAD=1", hasTraceEnvironment ? traceEnvironment : NULL, NULL };
 	char *respawnEnvironment[] = { "RESPAWN_REQUIRED=1", hasTraceEnvironment ? traceEnvironment : NULL, NULL };
 	char **environment = __firstLoad ? firstLoadEnvironment : respawnEnvironment;
-	int ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr, (char*[]){"jailbreakd",NULL}, environment);
+	ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr, (char*[]){"jailbreakd",NULL}, environment);
 	posix_spawnattr_destroy(&attr);
 
 	if (ret != 0) {
@@ -220,6 +272,22 @@ bool jailbreakdIsInitialized(void)
 
 bool jailbreakdIsReady(void)
 {
+	if (!__jailbreakd_ready || gJailbreakdPid <= 0) return false;
+
+	// A successful check-in is not permanent proof of service health.  Verify
+	// that the recorded PID still names a live jailbreakd process so the app
+	// cannot report "jailbroken" after the daemon has subsequently died.
+	struct proc_bsdinfo procInfo = {0};
+	int procInfoSize = proc_pidinfo(gJailbreakdPid, PROC_PIDTBSDINFO, 0, &procInfo, sizeof(procInfo));
+	char processPath[PATH_MAX] = {0};
+	if (procInfoSize != sizeof(procInfo)) return false;
+	if (procInfo.pbi_status == SZOMB) {
+		__jailbreakd_ready = false;
+		return false;
+	}
+	if (!proc_get_path(gJailbreakdPid, processPath) ||
+		!roothide_string_has_suffix(processPath, "/basebin/jailbreakd")) return false;
+
 	return __jailbreakd_ready;
 }
 

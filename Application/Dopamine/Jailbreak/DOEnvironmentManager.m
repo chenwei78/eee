@@ -401,7 +401,7 @@ extern char **environ;
     [self runAsRoot:^{
         [self runUnsandboxed:^{
             r = posix_spawn(&pid, argBuf[0], &act, &attr, (char *const *)argBuf, (char *const *)environ);
-            if (needsLegacySolution) {
+            if (needsLegacySolution && r == 0 && pid > 0) {
                 // Legacy solution is a gamble, which is why it was removed and superseeded by --waitfor
                 // But if jailbroken with <3.0.5, jbctl doesn't support --waitfor yet
                 kill(pid, SIGCONT);
@@ -428,6 +428,7 @@ extern char **environ;
         close(waitPipe[1]);
     }
 
+    if (r != 0 || pid <= 0) return r != 0 ? r : -1;
     return cmd_wait_for_exit(pid);
 }
 
@@ -448,7 +449,8 @@ extern char **environ;
 
 - (void)rebootUserspace
 {
-    [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
+    int result = [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
+    if (result != 0) NSLog(@"reboot_userspace returned %d", result);
 }
 
 - (void)refreshJailbreakApps

@@ -90,12 +90,6 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 
 __attribute__((constructor)) static void initializer(void)
 {
-	// During the first live injection opainject has suspended launchd's
-	// existing threads.  The RootHide crash reporter creates its own exception
-	// thread, so start it only after the subsequent userspace reboot.
-	if (getenv("DOPAMINE_INITIALIZED") != 0) {
-		crashreporter_start();
-	}
 	// Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
 	@autoreleasepool {
 		Dl_info selfInfo;
@@ -106,6 +100,15 @@ __attribute__((constructor)) static void initializer(void)
 	}
 	roothide_trace_init();
 	roothide_trace("[launchd] constructor entered; DOPAMINE_INITIALIZED=%d", getenv("DOPAMINE_INITIALIZED") != NULL);
+	// During the first live injection opainject has suspended launchd's
+	// existing threads.  The RootHide crash reporter creates its own exception
+	// thread, so start it only after the subsequent userspace reboot.  Initialize
+	// tracing first so an iOS-version-specific failure here remains visible.
+	if (getenv("DOPAMINE_INITIALIZED") != 0) {
+		roothide_trace("[launchd] phase: starting post-reboot crash reporter");
+		crashreporter_start();
+		roothide_trace("[launchd] phase complete: post-reboot crash reporter");
+	}
 	roothide_trace("[launchd] phase: RootHide pre-initialization");
 	roothide_launchd_preinit();
 	roothide_trace("[launchd] phase complete: RootHide pre-initialization");

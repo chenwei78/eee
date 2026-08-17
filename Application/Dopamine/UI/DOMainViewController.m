@@ -201,6 +201,42 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
 
 - (NSString *)rootHideTraceDiagnosisForTrace:(NSString *)trace
 {
+    // Prefer explicit failures over phase heuristics.  Keeping the last few
+    // lines preserves both the low-level cause and the app-level wrapper (for
+    // example a killed Bootstrap child followed by its raw wait status).
+    NSMutableArray<NSString *> *failureLines = [NSMutableArray array];
+    [trace enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        if ([line containsString:@"FAILURE:"]) [failureLines addObject:line];
+    }];
+    if (failureLines.count > 0) {
+        NSUInteger first = failureLines.count > 3 ? failureLines.count - 3 : 0;
+        NSArray<NSString *> *lastFailures = [failureLines subarrayWithRange:NSMakeRange(first, failureLines.count - first)];
+        return [NSString stringWithFormat:@"诊断结论：已记录明确错误，最后几条如下：\n%@", [lastFailures componentsJoinedByString:@"\n"]];
+    }
+
+    NSRange postRebootRange = [trace rangeOfString:@"[launchd] constructor entered; DOPAMINE_INITIALIZED=1" options:NSBackwardsSearch];
+    if (postRebootRange.location != NSNotFound) {
+        NSString *postRebootTrace = [trace substringFromIndex:postRebootRange.location];
+        if ([postRebootTrace containsString:@"phase: starting post-reboot crash reporter"] &&
+            ![postRebootTrace containsString:@"phase complete: post-reboot crash reporter"]) {
+            return @"诊断结论：用户空间重启后的 launchd 已进入，但停在 crash reporter 初始化。";
+        }
+        if ([postRebootTrace containsString:@"phase: recovering boomerang primitives"] &&
+            ![postRebootTrace containsString:@"phase complete: boomerang primitive recovery"]) {
+            return @"诊断结论：用户空间重启后的 launchd 停在 boomerang 内核原语恢复阶段。";
+        }
+        if ([postRebootTrace containsString:@"phase: RootHide post-initialization"] &&
+            ![postRebootTrace containsString:@"phase complete: RootHide post-initialization"]) {
+            return @"诊断结论：用户空间重启后的 RootHide 服务初始化没有完成。";
+        }
+        if (![postRebootTrace containsString:@"[jailbreakd] phase complete: check-in succeeded"]) {
+            return @"诊断结论：用户空间重启后的 launchd 已完成主要 Hook，但 jailbreakd 尚未完成 check-in。";
+        }
+    }
+    else if ([trace containsString:@"[app] phase: invoking userspace reboot"]) {
+        return @"诊断结论：App 已请求用户空间重启，但新的 launchd 构造函数没有进入。";
+    }
+
     if ([trace containsString:@"phase: gathering system information"] && ![trace containsString:@"phase complete: gathering system information"]) {
         return @"诊断结论：卡在系统信息或内核偏移准备阶段；请以最后一条日志为准。";
     }

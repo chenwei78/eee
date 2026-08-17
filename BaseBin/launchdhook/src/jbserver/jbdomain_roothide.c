@@ -56,8 +56,9 @@ static int trust_macho_recurse(const char *machoPath, const char *dlopenCallerIm
 	uint32_t cdhashesCount = 0;
 	recurse_collect_untrusted_cdhashes(machoPath, dlopenCallerImagePath, dlopenCallerExecutablePath, workingDir, &preferredArch, &cdhashes, &cdhashesCount);
 	if (cdhashes && cdhashesCount > 0) {
-		jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);
+		int trustResult = jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);
 		free(cdhashes);
+		return trustResult;
 	}
 	return 0;
 }
@@ -81,7 +82,7 @@ static int roothide_jailbroken_check(audit_token_t *callerToken, bool* jailbroke
 	// launchdhook is already active while the first RootHide bootstrap is
 	// being installed.  Only report success after the bootstrapper has
 	// completed all of its setup steps and written its completion marker.
-	*jailbroken = access(JBROOT_PATH("/.roothide_bootstrap_complete"), F_OK) == 0;
+	*jailbroken = access(JBROOT_PATH("/.roothide_bootstrap_complete"), F_OK) == 0 && jailbreakdIsReady();
 	return 0;
 }
 

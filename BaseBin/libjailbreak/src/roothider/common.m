@@ -15,6 +15,7 @@
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <mach-o/dyld.h>
 #include <sys/proc_info.h>
 #include <dispatch/dispatch.h>
@@ -190,7 +191,8 @@ int proc_paused(pid_t pid, bool* paused)
 
 int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume)
 {
-	while(true) {
+	bool observedPaused = false;
+	for (int attempt = 1; attempt <= 500; attempt++) {
 		bool paused = false;
 		if (proc_paused(pid, &paused) != 0) {
 			JBLogError("Failed to check if process(%d) is paused", pid);
@@ -199,9 +201,14 @@ int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume)
 		if(paused) {
 			//wait for process to be fully initialized (new task ipc enabling, csflags updating, etc.)
 			usleep(100*1000);
+			observedPaused = true;
 			break;
 		}
         usleep(10*1000);
+	}
+	if (!observedPaused) {
+		JBLogError("Timed out waiting for process(%d) to pause", pid);
+		return -2;
 	}
 
     int ret = callback(pid);
@@ -772,6 +779,7 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
         roothide_spawn_trace("recursive trust returned %d for %s", trustResult, path ?: "(null)");
         if(trustResult != 0) {
             JBLogError("Failed to trust executable: %s", path);
+            if(attr) posix_spawnattr_destroy(&attr);
             return 999;
         }
     }
@@ -785,6 +793,10 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     pid_t pid = 0;
     int ret = posix_spawn(&pid, path, fap, attrp, argv, envp);
     if(pidp) *pidp = pid;
+
+    // Do not leak the temporary START_SUSPENDED flag back to callers that
+    // reuse their spawn attributes.
+    posix_spawnattr_setflags(attrp, flags);
 
     JBLogDebug("spawn ret=%d pid=%d", ret, pid);
     roothide_spawn_trace("posix_spawn returned %d pid=%d path=%s", ret, pid, path ?: "(null)");
@@ -803,9 +815,14 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
             }
             if(patchResult != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
-                //jailbreak internal spawn, just let it hang forever so that we could get a panic log
-                //kill(pid, SIGQUIT); //core dump
-                //kill(pid, SIGKILL);
+                // Never leave a failed Bootstrap child suspended.  Besides
+                // leaking a process, that stale child makes the next attempt
+                // look like another jailbreak is still active.
+                int signalResult = kill(pid, SIGKILL);
+                int childStatus = 0;
+                while(waitpid(pid, &childStatus, 0) < 0 && errno == EINTR) {}
+                roothide_spawn_trace("terminated failed child pid=%d signal_result=%d status=%d", pid, signalResult, childStatus);
+                if(attr) posix_spawnattr_destroy(&attr);
                 return 202;
             }
         } else {

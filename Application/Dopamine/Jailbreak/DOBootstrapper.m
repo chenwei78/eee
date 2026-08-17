@@ -137,7 +137,10 @@ static int RootHideRunTracedBootstrapScript(const char *shellPath)
 
     char *const arguments[] = {
         (char *)shellPath,
-        (char *)"-x",
+        // Stop at the first failed setup command.  The bundled script does not
+        // enable errexit itself, so without -e an early SIGKILL can be hidden by
+        // a later successful command and leave a partially initialized root.
+        (char *)"-ex",
         (char *)"/prep_bootstrap.sh",
         NULL,
     };
@@ -1024,7 +1027,7 @@ static NSError *rootHideError(NSInteger code, NSString *message)
             [[NSFileManager defaultManager] removeItemAtPath:staleShellsTemp error:nil];
             RootHideAppendBootstrapTrace(@"removed stale /etc/shells.tmp from an interrupted Bootstrap");
         }
-        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (sh -x; last 64KB retained on failure)");
+        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (sh -ex; last 64KB retained on failure)");
         int r = RootHideRunTracedBootstrapScript(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation);
         if (r != 0) {
             RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: prep_bootstrap.sh returned %d", r]);

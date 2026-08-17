@@ -1,4 +1,5 @@
 #include "common.h"
+#include <errno.h>
 #include <xpc/xpc.h>
 #include <xpc_private.h>
 #include <mach-o/dyld.h>
@@ -173,7 +174,18 @@ static int spawn_exec_hook_common(bool isExec,
 
 	if (spawnConfig & kSpawnConfigTrust) {
 		// Upload binary to trustcache if needed
-		trust_binary(path);
+		int trustResult = trust_binary(path);
+		// During the first Bootstrap an untrusted child would otherwise spawn
+		// successfully and immediately die with an opaque SIGKILL.  Return a
+		// deterministic error to the shell so the bounded command trace identifies
+		// the exact path whose recursive trust failed.
+		if (trustResult != 0 && getenv("ROOTHIDE_BOOTSTRAP_RECURSIVE_TRUST")) {
+			if (isExec) {
+				errno = EACCES;
+				return -1;
+			}
+			return EACCES;
+		}
 	}
 
 	const char *existingLibraryInserts = envbuf_getenv((const char **)envp, "DYLD_INSERT_LIBRARIES");
@@ -352,7 +364,7 @@ static int spawn_exec_hook_common(bool isExec,
 		envbuf_free(envc);
 	}
 
-	if (personaFixUid == 0 || personaFixGid == 0 && childPid != -1) {
+	if ((personaFixUid == 0 || personaFixGid == 0) && childPid != -1) {
 		jbclient_persona_fix(childPid, personaFixUid, personaFixGid);
 		if (personaFixNeedsResume) {
 			kill(childPid, SIGCONT);

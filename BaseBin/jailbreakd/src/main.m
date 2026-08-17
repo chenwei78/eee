@@ -4,9 +4,11 @@
 #include <kern_memorystatus.h>
 #include <mach-o/dyld.h>
 #include <libproc.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <libjailbreak/libjailbreak.h>
 #include <libjailbreak/roothider.h>
@@ -57,13 +59,26 @@ void enableXPCLog(void* debugLog, void* errorLog);
 int main(int argc, char* argv[])
 {
 	RootHideJailbreakdTrace("main entered; uid=%d pid=%d ppid=%d", getuid(), getpid(), getppid());
-	RootHideJailbreakdTrace("phase: starting crash reporter");
-	crashreporter_start();
-	RootHideJailbreakdTrace("phase complete: crash reporter");
+	bool firstLiveInjection = getenv("ROOTHIDE_JAILBREAKD_FIRST_LOAD") != NULL;
+	unsetenv("ROOTHIDE_JAILBREAKD_FIRST_LOAD");
 
-	errno = 0;
-	int jetsamResult = setJetsamLimit(50, false);
-	RootHideJailbreakdTrace("jetsam limit request returned %d errno=%d; continuing even if unavailable", jetsamResult, errno);
+	// crashreporter_start installs task exception ports.  iOS 18 kills this
+	// daemon at that call even after the first-load process patch has been
+	// applied.  It is diagnostic-only and must not sit on the service's critical
+	// startup path, including after the userspace reboot.
+	RootHideJailbreakdTrace("phase skipped: crash reporter disabled for jailbreakd");
+
+	if (firstLiveInjection) {
+		// The first instance only exists to patch Bootstrap children before the
+		// imminent userspace reboot.  Do not make it depend on optional Jetsam
+		// policy changes while launchd is in the live-injection state.
+		RootHideJailbreakdTrace("phase skipped: jetsam limit during first live injection");
+	}
+	else {
+		errno = 0;
+		int jetsamResult = setJetsamLimit(50, false);
+		RootHideJailbreakdTrace("jetsam limit request returned %d errno=%d; continuing even if unavailable", jetsamResult, errno);
+	}
 
 #ifdef ENABLE_LOGS
 	enableXPCLog(JBLogDebugFunction, JBLogErrorFunction);
@@ -97,7 +112,11 @@ int main(int argc, char* argv[])
 		RootHideJailbreakdTrace("phase complete: registered bootstrap port=%x", bootstraport);
 
 		registeredPorts[2] = MACH_PORT_NULL;
-		mach_ports_register(mach_task_self(), registeredPorts, registeredPortsCount);
+		kr = mach_ports_register(mach_task_self(), registeredPorts, registeredPortsCount);
+		if (kr != KERN_SUCCESS) {
+			RootHideJailbreakdTrace("FAILURE: clearing registered bootstrap port returned %x", kr);
+			return 7;
+		}
 
 		JBLogDebug("start initializing jb primitives");
 		RootHideJailbreakdTrace("phase: initializing jailbreak primitives");
@@ -113,6 +132,7 @@ int main(int argc, char* argv[])
 
 		if(getenv("RESPAWN_REQUIRED"))
 		{
+			RootHideJailbreakdTrace("phase: preparing post-reboot jailbreakd respawn");
 			unsetenv("RESPAWN_REQUIRED");
 
 			char selfPath[PATH_MAX]={0};
@@ -131,20 +151,29 @@ int main(int argc, char* argv[])
 
 			if(ret != 0) {
 				JBLogError("posix_spawn jailbreakd failed: %d, %s", ret, strerror(ret));
+				RootHideJailbreakdTrace("FAILURE: post-reboot respawn returned %d errno=%d", ret, errno);
 				return 4;
 			}
 
 			JBLogDebug("jailbreakd respawned: %d", pid);
+			RootHideJailbreakdTrace("post-reboot jailbreakd spawned suspended; pid=%d", pid);
 	
-			if(unrestrict(pid, proc_patch_dyld, false) != 0) {
+			int patchResult = unrestrict(pid, proc_patch_dyld, false);
+			if(patchResult != 0) {
 				JBLogError("Failed to unrestrict process %d", pid);
+				RootHideJailbreakdTrace("FAILURE: patching post-reboot jailbreakd returned %d", patchResult);
+				kill(pid, SIGKILL);
+				waitpid(pid, NULL, 0);
 				return 5;
 			}
+			RootHideJailbreakdTrace("phase complete: post-reboot jailbreakd process patch");
 
 			if(dyld_patch_enabled()) {
+				RootHideJailbreakdTrace("dyld patch enabled; handing service role to respawned jailbreakd");
 				kill(pid, SIGCONT);
 				return 0;
 			} else {
+				RootHideJailbreakdTrace("dyld patch disabled; keeping original jailbreakd instance");
 				kill(pid, SIGKILL);
 				waitpid(pid, NULL, 0);
 			}
@@ -163,6 +192,10 @@ int main(int argc, char* argv[])
 		RootHideJailbreakdTrace("phase complete: check-in succeeded; server port=%x", serverPort);
 
 		dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)serverPort, 0, dispatch_get_main_queue());
+		if (!source) {
+			RootHideJailbreakdTrace("FAILURE: creating jailbreakd server dispatch source");
+			return 7;
+		}
 		dispatch_source_set_event_handler(source, ^{
 			jailbreakd_received_message(serverPort);
 		});

@@ -9,6 +9,7 @@
 #include <util.h>
 #include <ptrauth.h>
 #include <libjailbreak/jbclient_xpc.h>
+#include <libjailbreak/jbclient_roothide.h>
 #include <libjailbreak/codesign.h>
 #include <libjailbreak/jbroot.h>
 #include <libjailbreak/hookd.h>
@@ -238,20 +239,28 @@ bool should_enable_tweaks(void)
 	return true;
 }
 
+static int trust_spawned_executable(const char *path)
+{
+	if (getenv("ROOTHIDE_BOOTSTRAP_RECURSIVE_TRUST")) {
+		return jbclient_trust_executable_recurse(path, NULL);
+	}
+	return jbclient_trust_file_by_path(path);
+}
+
 int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path, struct _posix_spawn_args_desc *desc, char *const argv[restrict], char * const envp[restrict])
 {
-	return posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, jbclient_trust_file_by_path, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
+	return posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, trust_spawned_executable, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
 }
 
 int __posix_spawn_hook_with_filter(pid_t *restrict pid, const char *restrict path, char *const argv[restrict], char * const envp[restrict], struct _posix_spawn_args_desc *desc, int *ret)
 {
-	*ret = posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, jbclient_trust_file_by_path, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
+	*ret = posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, trust_spawned_executable, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
 	return 1;
 }
 
 int __execve_hook(const char *path, char *const argv[], char *const envp[])
 {
-	return execve_hook_shared(path, argv, envp, (void *)__execve_inline, jbclient_trust_file_by_path);
+	return execve_hook_shared(path, argv, envp, (void *)__execve_inline, trust_spawned_executable);
 }
 
 xpc_object_t copy_entitlements_xpc(void)
