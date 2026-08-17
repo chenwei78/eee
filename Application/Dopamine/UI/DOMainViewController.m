@@ -28,6 +28,8 @@
 
 @end
 
+static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTrace";
+
 @implementation DOMainViewController
 
 - (void)viewDidLoad {
@@ -250,15 +252,17 @@
     NSString *tracePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/RootHideLaunchdTrace.log"];
     NSString *trace = [NSString stringWithContentsOfFile:tracePath encoding:NSUTF8StringEncoding error:nil];
     if (![trace containsString:@"RootHide jailbreak diagnostic trace"]) return;
+    if ([[[NSUserDefaults standardUserDefaults] stringForKey:RootHideLastPresentedTraceKey] isEqualToString:trace]) return;
 
     self.didPresentRootHideTrace = YES;
+    [[NSUserDefaults standardUserDefaults] setObject:trace forKey:RootHideLastPresentedTraceKey];
     NSMutableArray<NSString *> *traceLines = [NSMutableArray array];
     for (NSString *line in [trace componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         if (line.length > 0) [traceLines addObject:line];
     }
     [traceLines addObject:[self rootHideTraceDiagnosisForTrace:trace]];
     [DOUIManager sharedInstance].logRecord = traceLines;
-    [self.navigationController pushViewController:[[DOLogCrashViewController alloc] initWithTitle:@"RootHide 启动诊断"] animated:YES];
+    [self.navigationController pushViewController:[[DOLogCrashViewController alloc] initWithTitle:@"RootHide 启动诊断" exitOnDisappear:NO] animated:YES];
 }
 
 - (void)startJailbreak

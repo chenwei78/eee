@@ -98,9 +98,10 @@ static void RootHideAppendTrace(NSString *message)
 - (NSError *)beginRootHideLaunchdTrace
 {
     NSString *tracePath = RootHideLaunchdTracePath();
-    NSString *header = @"RootHide jailbreak diagnostic trace\n"
-                       @"The final completed phase identifies where the jailbreak startup stopped.\n"
-                       @"This file is replaced at the start of every RootHide jailbreak attempt.\n\n";
+    NSString *header = [NSString stringWithFormat:@"RootHide jailbreak diagnostic trace\n"
+                                              @"The final completed phase identifies where the jailbreak startup stopped.\n"
+                                              @"This file is replaced at the start of every RootHide jailbreak attempt.\n"
+                                              @"Attempt ID: %@\n\n", NSUUID.UUID.UUIDString];
 
     NSError *writeError = nil;
     if (![header writeToFile:tracePath atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {

@@ -15,6 +15,7 @@
 @interface DOLogCrashViewController ()
 
 @property (nonatomic, retain) NSString *title;
+@property (nonatomic) BOOL exitOnDisappear;
 
 @end
 
@@ -22,9 +23,15 @@
 
 - (id)initWithTitle:(NSString*)title
 {
+    return [self initWithTitle:title exitOnDisappear:YES];
+}
+
+- (id)initWithTitle:(NSString*)title exitOnDisappear:(BOOL)exitOnDisappear
+{
     if (self = [super init])
     {
         self.title = title;
+        self.exitOnDisappear = exitOnDisappear;
     }
     return self;
 }
@@ -88,6 +95,7 @@
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
+    if (!self.exitOnDisappear) return;
     [[UIApplication sharedApplication] performSelector:@selector(suspend)];
     [NSThread sleepForTimeInterval:0.3];
     exit(0);
