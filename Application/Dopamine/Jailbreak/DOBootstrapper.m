@@ -14,11 +14,18 @@
 #import <libjailbreak/jbclient_xpc.h>
 #import <libjailbreak/jbclient_roothide.h>
 #import <libjailbreak/roothider.h>
+#import <errno.h>
 #import <sys/mount.h>
+#import <sys/wait.h>
 #import <dlfcn.h>
+#import <fcntl.h>
+#import <poll.h>
+#import <spawn.h>
 #import <sys/stat.h>
 #import <unistd.h>
 #import "NSString+Version.h"
+
+extern char **environ;
 
 #define LIBKRW_DOPAMINE_BUNDLED_VERSION @"2.0.3"
 #define LIBROOT_DOPAMINE_BUNDLED_VERSION @"1.0.1"
@@ -69,6 +76,168 @@ static void RootHideAppendBootstrapTrace(NSString *message)
     [traceFile writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
     [traceFile synchronizeFile];
     [traceFile closeFile];
+}
+
+static void RootHideCaptureBootstrapOutput(NSMutableData *tail, const void *bytes, NSUInteger length, BOOL *truncated)
+{
+    static const NSUInteger outputLimit = 64 * 1024;
+    if (length >= outputLimit) {
+        [tail setData:[NSData dataWithBytes:(const uint8_t *)bytes + length - outputLimit length:outputLimit]];
+        *truncated = YES;
+        return;
+    }
+
+    [tail appendBytes:bytes length:length];
+    if (tail.length > outputLimit) {
+        NSUInteger overflow = tail.length - outputLimit;
+        [tail replaceBytesInRange:NSMakeRange(0, overflow) withBytes:NULL length:0];
+        *truncated = YES;
+    }
+}
+
+static void RootHideAppendBootstrapOutputTail(NSData *tail, BOOL truncated)
+{
+    if (tail.length == 0) {
+        RootHideAppendBootstrapTrace(@"prep_bootstrap.sh produced no captured output");
+        return;
+    }
+
+    NSString *output = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
+    if (!output) output = [[NSString alloc] initWithData:tail encoding:NSISOLatin1StringEncoding];
+    if (!output) {
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"prep_bootstrap.sh output could not be decoded (%lu bytes)", (unsigned long)tail.length]);
+        return;
+    }
+
+    RootHideAppendBootstrapTrace([NSString stringWithFormat:
+        @"prep_bootstrap.sh output tail begin (%lu bytes%@)\n%@\n[bootstrap] prep_bootstrap.sh output tail end",
+        (unsigned long)tail.length,
+        truncated ? @", earlier output discarded" : @"",
+        output]);
+}
+
+static int RootHideRunTracedBootstrapScript(const char *shellPath)
+{
+    int outputPipe[2] = {-1, -1};
+    if (pipe(outputPipe) != 0) {
+        int pipeError = errno;
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: creating prep_bootstrap.sh output pipe: errno=%d", pipeError]);
+        return pipeError ?: -1;
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, outputPipe[0]);
+    posix_spawn_file_actions_addclose(&actions, outputPipe[1]);
+
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+
+    char *const arguments[] = {
+        (char *)shellPath,
+        (char *)"-x",
+        (char *)"/prep_bootstrap.sh",
+        NULL,
+    };
+
+    pid_t child = 0;
+    int spawnResult = exec_cmd_roothide_spawn(&child, shellPath, &actions, &attributes, arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attributes);
+    close(outputPipe[1]);
+
+    if (spawnResult != 0) {
+        close(outputPipe[0]);
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: spawning traced prep_bootstrap.sh returned %d", spawnResult]);
+        return spawnResult;
+    }
+
+    int descriptorFlags = fcntl(outputPipe[0], F_GETFL);
+    if (descriptorFlags >= 0) fcntl(outputPipe[0], F_SETFL, descriptorFlags | O_NONBLOCK);
+
+    NSMutableData *outputTail = [NSMutableData dataWithCapacity:64 * 1024];
+    BOOL outputTruncated = NO;
+    BOOL pipeFinished = NO;
+    BOOL childFinished = NO;
+    int idlePollsAfterExit = 0;
+    int status = 0;
+
+    while (!pipeFinished) {
+        struct pollfd descriptor = {
+            .fd = outputPipe[0],
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        };
+        int pollResult = poll(&descriptor, 1, 100);
+        if (pollResult > 0 && (descriptor.revents & (POLLIN | POLLHUP | POLLERR))) {
+            BOOL readAny = NO;
+            while (1) {
+                uint8_t buffer[4096];
+                ssize_t bytesRead = read(outputPipe[0], buffer, sizeof(buffer));
+                if (bytesRead > 0) {
+                    readAny = YES;
+                    RootHideCaptureBootstrapOutput(outputTail, buffer, (NSUInteger)bytesRead, &outputTruncated);
+                    continue;
+                }
+                if (bytesRead == 0) pipeFinished = YES;
+                if (bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    RootHideAppendBootstrapTrace([NSString stringWithFormat:@"prep_bootstrap.sh output read stopped: errno=%d", errno]);
+                    pipeFinished = YES;
+                }
+                break;
+            }
+            if (readAny) idlePollsAfterExit = 0;
+        }
+        else if (pollResult < 0 && errno != EINTR) {
+            RootHideAppendBootstrapTrace([NSString stringWithFormat:@"prep_bootstrap.sh output poll stopped: errno=%d", errno]);
+            pipeFinished = YES;
+        }
+
+        if (!childFinished) {
+            pid_t waitResult = waitpid(child, &status, WNOHANG);
+            if (waitResult == child) childFinished = YES;
+            else if (waitResult < 0 && errno != EINTR) {
+                RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: waitpid for prep_bootstrap.sh: errno=%d", errno]);
+                childFinished = YES;
+                status = -1;
+            }
+        }
+
+        // A background process may inherit the pipe.  Once the script has
+        // exited and no more output arrives for 500 ms, do not wait forever.
+        if (childFinished && !pipeFinished) {
+            if (pollResult == 0) idlePollsAfterExit++;
+            if (idlePollsAfterExit >= 5) pipeFinished = YES;
+        }
+    }
+
+    close(outputPipe[0]);
+    if (!childFinished) {
+        do {
+            if (waitpid(child, &status, 0) == child) {
+                childFinished = YES;
+                break;
+            }
+        } while (errno == EINTR);
+        if (!childFinished) status = -1;
+    }
+
+    if (status == -1) {
+        RootHideAppendBootstrapOutputTail(outputTail, outputTruncated);
+        return -1;
+    }
+
+    if (WIFEXITED(status)) {
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"prep_bootstrap.sh exited with code %d (raw status %d)", WEXITSTATUS(status), status]);
+    }
+    else if (WIFSIGNALED(status)) {
+        RootHideAppendBootstrapTrace([NSString stringWithFormat:@"prep_bootstrap.sh terminated by signal %d (raw status %d)", WTERMSIG(status), status]);
+    }
+
+    if (status != 0) RootHideAppendBootstrapOutputTail(outputTail, outputTruncated);
+    return status;
 }
 
 @implementation DOBootstrapper
@@ -855,8 +1024,8 @@ static NSError *rootHideError(NSInteger code, NSString *message)
             [[NSFileManager defaultManager] removeItemAtPath:staleShellsTemp error:nil];
             RootHideAppendBootstrapTrace(@"removed stale /etc/shells.tmp from an interrupted Bootstrap");
         }
-        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (script output is capped)");
-        int r = exec_cmd_trusted(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation, "/prep_bootstrap.sh", NULL);
+        RootHideAppendBootstrapTrace(@"phase: starting prep_bootstrap.sh (sh -x; last 64KB retained on failure)");
+        int r = RootHideRunTracedBootstrapScript(rootHideJbrootPath(@"/bin/sh").fileSystemRepresentation);
         if (r != 0) {
             RootHideAppendBootstrapTrace([NSString stringWithFormat:@"FAILURE: prep_bootstrap.sh returned %d", r]);
             return rootHideError(BootstrapErrorCodeFailedFinalising, [NSString stringWithFormat:@"prep_bootstrap.sh returned %d", r]);
