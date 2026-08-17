@@ -540,7 +540,6 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
             return;
         }
         int messageResult = jbserver_received_boomerang_xpc_message(&gBoomerangServer, xdict);
-        if (xdict) xpc_release(xdict);
         if (messageResult == JBS_BOOMERANG_DONE) {
             dispatch_semaphore_signal(boomerangDone);
         }
