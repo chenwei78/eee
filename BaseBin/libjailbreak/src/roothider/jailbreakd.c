@@ -44,8 +44,14 @@ static pid_t gJailbreakdPid = -1;
 static bool gJailbreakdExitObserved = false;
 static bool gJailbreakdExitConsumed = false;
 static int gJailbreakdExitStatus = 0;
+static jailbreakd_bootstrap_message_handler_t gJailbreakdBootstrapMessageHandler = NULL;
 
 #define JAILBREAKD_CLIENT_PORT_FAST_GET
+
+void jailbreakdSetBootstrapMessageHandler(jailbreakd_bootstrap_message_handler_t handler)
+{
+	gJailbreakdBootstrapMessageHandler = handler;
+}
 
 int registerServerPort()
 {
@@ -183,9 +189,21 @@ int spawnJailbreakd()
 			JBLogDebug("received message from jailbreakd");
 			xpc_object_t xdict = NULL;
 			int err = xpc_pipe_receive(bootstraport, &xdict);
-			if(err == 0) {
-				abort(); /* xpchook should handle the jbclient messages, should never go here */
-				//jbserver_received_xpc_message(&gGlobalServer, xdict);
+			if (err == 0 && xdict) {
+				// Older libxpc versions route this receive through launchdhook's
+				// xpc_receive_mach_msg hook, which handles the message before this
+				// point.  On iOS 18 the private receive path can bypass that hook.
+				// Process the message explicitly instead of aborting PID 1.
+				int handleResult = gJailbreakdBootstrapMessageHandler ?
+					gJailbreakdBootstrapMessageHandler(xdict) : -1;
+				if (handleResult != 0) {
+					xpc_object_t xreply = xpc_dictionary_create_reply(xdict);
+					if (xreply) {
+						xpc_dictionary_set_int64(xreply, "result", handleResult);
+						xpc_pipe_routine_reply(xreply);
+						xpc_release(xreply);
+					}
+				}
 				xpc_release(xdict);
 			}
 		});

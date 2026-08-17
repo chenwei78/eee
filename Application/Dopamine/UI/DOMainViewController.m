@@ -274,6 +274,13 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
         ![trace containsString:@"[jailbreakd] jailbreak primitive initialization returned"]) {
         if ([trace containsString:@"[primitive] requesting system information from launchd"] &&
             ![trace containsString:@"[primitive] system information request returned"]) {
+            if ([trace containsString:@"[launchd] direct jailbreakd bootstrap message"] &&
+                ![trace containsString:@"[launchd] direct jailbreakd bootstrap handler returned"]) {
+                return @"诊断结论：jailbreakd 的 sysinfo 消息已到达专用端口，但 RootHide 全局 jbserver 处理器没有返回。";
+            }
+            if ([trace containsString:@"[launchd] direct jailbreakd bootstrap handler returned 0"]) {
+                return @"诊断结论：launchd 已处理并回复 jailbreakd 的 sysinfo 请求，但回复没有送回客户端。";
+            }
             return @"诊断结论：临时 jailbreakd 已启动，但向 launchd 请求系统信息的 XPC 调用没有返回。";
         }
         if ([trace containsString:@"[primitive] requesting PTE physrw handoff from launchd"] &&

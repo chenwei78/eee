@@ -2,6 +2,7 @@
 #import <libjailbreak/libjailbreak.h>
 #import <libjailbreak/roothider.h>
 #import "roothide_trace.h"
+#import "jbserver/jbserver_global.h"
 
 /*
  * Small bridge between Dopamine 3's modern launchdhook and RootHide's
@@ -9,8 +10,20 @@
  * normal launchdhook/systemhook sources; this bridge only enables the
  * RootHide-specific process service and state transitions.
  */
+static int roothide_jailbreakd_bootstrap_message_handler(xpc_object_t message)
+{
+    uint64_t domain = xpc_dictionary_get_uint64(message, "jb-domain");
+    uint64_t action = xpc_dictionary_get_uint64(message, "action");
+    roothide_trace("[launchd] direct jailbreakd bootstrap message; domain=%llu action=%llu",
+                   (unsigned long long)domain, (unsigned long long)action);
+    int result = jbserver_received_xpc_message(&gGlobalServer, message);
+    roothide_trace("[launchd] direct jailbreakd bootstrap handler returned %d", result);
+    return result;
+}
+
 void roothide_launchd_preinit(void)
 {
+    jailbreakdSetBootstrapMessageHandler(roothide_jailbreakd_bootstrap_message_handler);
     exec_set_patch(false);
 }
 

@@ -2,6 +2,7 @@
 #define JAILBREAKD_H
 
 #include <unistd.h>
+#include <xpc/xpc.h>
 
 typedef enum {
 	JBD_MSG_TEST_CALL = 101,
@@ -15,6 +16,9 @@ typedef enum {
 } JBD_MESSAGE_ID;
 
 void enableJBDLog(void* debugLog, void* errorLog);
+
+typedef int (*jailbreakd_bootstrap_message_handler_t)(xpc_object_t message);
+void jailbreakdSetBootstrapMessageHandler(jailbreakd_bootstrap_message_handler_t handler);
 
 int initJailbreakd(bool firstLoad);
 bool jailbreakdIsInitialized(void);
