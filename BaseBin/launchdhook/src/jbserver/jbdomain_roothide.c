@@ -1,4 +1,7 @@
+#include <dispatch/dispatch.h>
+#include <errno.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/param.h>
@@ -12,6 +15,46 @@
 #include <libjailbreak/codesign.h>
 #include "../roothide_trace.h"
 #include "../spawn_hook.h"
+
+int reboot3(uint64_t flags, ...);
+#define RB2_USERREBOOT (0x2000000000000000llu)
+
+static bool gPid1UserspaceRebootScheduled = false;
+
+static void roothide_pid1_userspace_reboot(void *context)
+{
+	(void)context;
+	pid_t pid = getpid();
+	roothide_trace("[launchd] PID 1 userspace-reboot request entered; pid=%d uid=%d euid=%d",
+	               pid, getuid(), geteuid());
+	if (pid != 1) {
+		roothide_trace("[launchd] FAILURE: refusing internal userspace-reboot request outside PID 1");
+		__atomic_store_n(&gPid1UserspaceRebootScheduled, false, __ATOMIC_RELEASE);
+		return;
+	}
+	errno = 0;
+	roothide_trace("[launchd] PID 1 calling reboot3 with RB2_USERREBOOT");
+	int result = reboot3(RB2_USERREBOOT);
+	int savedErrno = errno;
+	roothide_trace("[launchd] PID 1 reboot3 returned %d errno=%d (%s)",
+	               result, savedErrno, strerror(savedErrno));
+	__atomic_store_n(&gPid1UserspaceRebootScheduled, false, __ATOMIC_RELEASE);
+}
+
+static void roothide_schedule_pid1_userspace_reboot(void)
+{
+	bool expected = false;
+	if (__atomic_compare_exchange_n(&gPid1UserspaceRebootScheduled, &expected, true,
+	                                false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+		                 dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0),
+		                 NULL, roothide_pid1_userspace_reboot);
+		roothide_trace("[launchd] PID 1 userspace-reboot request scheduled; delay_ms=500");
+	}
+	else {
+		roothide_trace("[launchd] PID 1 userspace-reboot request already scheduled");
+	}
+}
 
 int roothide_unsupport_request()
 {
@@ -351,6 +394,11 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 	// request, unlike the working stock Dopamine sequence.
 	if (__builtin_available(iOS 18.0, *)) {
 		roothide_trace("[launchd] phase deferred: temporary jailbreakd termination to launchd userspace teardown");
+		// iOS 18 silently declines the otherwise valid request when it comes from
+		// the rewritten RootHide jbctl.  Schedule the same reboot3 request from a
+		// launchd worker after this synchronous preflight reply has been delivered;
+		// the authoritative audit identity is then PID 1 itself.
+		roothide_schedule_pid1_userspace_reboot();
 	}
 
 	// Primitive stashing deliberately remains in the final self-spawn/self-exec
