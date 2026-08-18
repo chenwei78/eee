@@ -823,12 +823,25 @@ int fd_attach_signature(int fd, fsignatures_t *signature)
 
 int cmd_wait_for_exit(pid_t pid)
 {
+	roothide_spawn_trace("waiting for child pid=%d", pid);
 	int status = 0;
-	do {
-		if (waitpid(pid, &status, 0) == -1) {
+	for (;;) {
+		pid_t waitResult;
+		do {
+			waitResult = waitpid(pid, &status, 0);
+		} while (waitResult < 0 && errno == EINTR);
+
+		if (waitResult < 0) {
+			roothide_spawn_trace("waitpid failed for child pid=%d errno=%d", pid, errno);
 			return -1;
 		}
-	} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+		if (WIFEXITED(status) || WIFSIGNALED(status)) break;
+		roothide_spawn_trace("child pid=%d reported intermediate wait status=%d", pid, status);
+	}
+
+	roothide_spawn_trace("child wait completed pid=%d status=%d exited=%d exit_code=%d signaled=%d signal=%d",
+	                     pid, status, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+	                     WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 	return status;
 }
 

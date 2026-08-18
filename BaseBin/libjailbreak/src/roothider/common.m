@@ -32,7 +32,7 @@ bool launchdhookFirstLoad = false;
 // This remains available before jailbreakd starts, unlike the regular debug
 // logger.  Read the trace path on every call because early bootstrap spawns
 // occur before the app has installed the trace-path configuration file.
-static void roothide_spawn_trace(const char *format, ...)
+void roothide_spawn_trace(const char *format, ...)
 {
     if (!format) return;
 

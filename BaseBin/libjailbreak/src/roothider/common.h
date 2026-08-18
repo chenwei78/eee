@@ -67,6 +67,7 @@ void hideDeveloperMode();
 
 void exec_set_patch(bool enabled);
 void exec_set_bootstrap_trust_only(bool enabled);
+void roothide_spawn_trace(const char *format, ...);
 int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]);
 
 void roothide_handle_xpc_msg(xpc_object_t xmsg);

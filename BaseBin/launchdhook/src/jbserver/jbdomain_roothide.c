@@ -242,12 +242,20 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 	}
 
 	int spawnHookResult = spawn_hook_install_result();
-	int execHookResult = exec_hook_install_result();
-	roothide_trace("[launchd] userspace-reboot preflight requested by pid=%d; spawn_hook=%d execve_hook=%d",
-	               callerPid, spawnHookResult, execHookResult);
-	if (spawnHookResult != KERN_SUCCESS || execHookResult != KERN_SUCCESS) {
-		roothide_trace("[launchd] FAILURE: refusing userspace reboot because process replacement hooks are not installed");
+	roothide_trace("[launchd] userspace-reboot preflight requested by pid=%d; spawn_hook=%d",
+	               callerPid, spawnHookResult);
+	if (spawnHookResult != KERN_SUCCESS) {
+		roothide_trace("[launchd] FAILURE: refusing userspace reboot because the spawn hook is not installed");
 		return -2;
+	}
+
+	// Install the speculative execve coverage only immediately before reboot.
+	// Keeping it active throughout first-load Bootstrap destabilizes PID 1 on
+	// iOS 18 when launchd takes an unrelated exec path.
+	int execHookResult = exec_hook_ensure_installed();
+	if (execHookResult != KERN_SUCCESS) {
+		roothide_trace("[launchd] FAILURE: refusing userspace reboot because deferred execve hook installation returned %d", execHookResult);
+		return -3;
 	}
 
 	// Primitive stashing deliberately remains in the final self-spawn/self-exec

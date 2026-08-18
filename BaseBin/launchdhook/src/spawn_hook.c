@@ -31,17 +31,13 @@ void free_boot_logo(void);
 
 static int gSpawnHookInstallResult = KERN_FAILURE;
 static int gExecHookInstallResult = KERN_FAILURE;
+static bool gExecHookInstallAttempted = false;
 static volatile int gPostUserspaceRebootSpawnTraceRemaining = 0;
 static volatile int gPostUserspaceRebootSpawnTraceSequence = 0;
 
 int spawn_hook_install_result(void)
 {
 	return gSpawnHookInstallResult;
-}
-
-int exec_hook_install_result(void)
-{
-	return gExecHookInstallResult;
 }
 
 void spawn_hook_note_userspace_reboot(void)
@@ -335,13 +331,26 @@ int __execve_hook(const char *path, char *const argv[], char *const envp[])
 		}
 	}
 
-	return execve_hook_shared(path, argv, envp, (void *)__execve_inline, systemwide_trust_file_by_path);
+	// launchd only needs this hook to preserve RootHide across its own
+	// userspace-reboot replacement.  Applying the generic exec hook here can
+	// perform trust and environment work while first-load jailbreakd is absent.
+	return __execve_inline(path, argv, envp);
+}
+
+int exec_hook_ensure_installed(void)
+{
+	if (!gExecHookInstallAttempted) {
+		gExecHookInstallAttempted = true;
+		gExecHookInstallResult = litehook_hook_function(__execve, __execve_hook);
+		roothide_trace("[launchd] deferred execve hook installation returned %d; source=%p target=%p",
+		               gExecHookInstallResult, (void *)__execve, (void *)__execve_hook);
+	}
+	return gExecHookInstallResult;
 }
 
 void initSpawnHooks(void)
 {
 	gSpawnHookInstallResult = litehook_hook_function(__posix_spawn, __posix_spawn_hook);
-	gExecHookInstallResult = litehook_hook_function(__execve, __execve_hook);
-	roothide_trace("[launchd] process replacement hook installation; spawn=%d execve=%d",
-	               gSpawnHookInstallResult, gExecHookInstallResult);
+	roothide_trace("[launchd] spawn hook installation returned %d; execve hook deferred until userspace-reboot preflight",
+	               gSpawnHookInstallResult);
 }
