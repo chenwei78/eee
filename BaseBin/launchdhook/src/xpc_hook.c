@@ -109,13 +109,18 @@ int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_objec
 			spawn_hook_note_userspace_reboot();
 		}
 
-		if (userspaceRebootMessage && __builtin_available(iOS 18.0, *)) {
-			// RootHide 2.x carries a legacy iOS 15 workaround that force-unmounts
-			// /Developer as soon as launchd receives RB2_USERREBOOT.  Its official
-			// launchd XPC entry does not call that mutator, and ordinary Dopamine
-			// waits until launchd's final self-replacement.  Preserve that ordering
-			// on iOS 18 so launchd can complete its own authorization and teardown.
-			roothide_trace("[launchd] iOS 18 RB2 path: skipped legacy RootHide pre-teardown /Developer unmount");
+		if (userspaceRebootMessage) {
+			if (__builtin_available(iOS 18.0, *)) {
+				// RootHide 2.x carries a legacy iOS 15 workaround that force-unmounts
+				// /Developer as soon as launchd receives RB2_USERREBOOT.  Its official
+				// launchd XPC entry does not call that mutator, and ordinary Dopamine
+				// waits until launchd's final self-replacement.  Preserve that ordering
+				// on iOS 18 so launchd can complete its own authorization and teardown.
+				roothide_trace("[launchd] iOS 18 RB2 path: skipped legacy RootHide pre-teardown /Developer unmount");
+			}
+			else {
+				roothide_handle_xpc_msg(*xOut);
+			}
 		}
 		else {
 			roothide_handle_xpc_msg(*xOut);

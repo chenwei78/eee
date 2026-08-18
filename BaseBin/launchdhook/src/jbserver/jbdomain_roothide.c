@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <sys/param.h>
 #include <libproc.h>
+#include <xpc/xpc.h>
 #include <xpc_private.h>
 #include "jbserver_global.h"
 
