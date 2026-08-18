@@ -278,7 +278,7 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 
 	char callerPath[PATH_MAX] = {0};
 	int callerPathResult = proc_pidpath_audittoken(callerToken, callerPath, sizeof(callerPath));
-	bool expectedCaller = callerPathResult > 0 && string_has_suffix(callerPath, "/basebin/jbctl");
+	bool expectedCaller = callerPathResult > 0 && roothide_string_has_suffix(callerPath, "/basebin/jbctl");
 	if (!expectedCaller) {
 		roothide_trace("[launchd] FAILURE: denied userspace-reboot preparation from unexpected path; pid=%d path_result=%d path=%s",
 		               callerPid, callerPathResult, callerPath[0] ? callerPath : "(unavailable)");
