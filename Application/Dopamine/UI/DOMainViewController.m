@@ -248,6 +248,19 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
         }
         if (rebootXPCObserved && !replacementMatched) {
+            __block BOOL callerAuthorizationVerified = NO;
+            [trace enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+                if ([line containsString:@"userspace-reboot caller authorization after repair;"]) {
+                    callerAuthorizationVerified = [line containsString:@"csops=0"] && [line containsString:@"platform=1"];
+                    *stop = YES;
+                }
+            }];
+            if (!callerAuthorizationVerified) {
+                return @"诊断结论：RB2_USERREBOOT 已到达 launchd，但 jbctl 的运行时平台授权没有验证成功；请查看 caller authorization 行。";
+            }
+            if (![trace containsString:@"iOS 18 RB2 path: skipped legacy RootHide pre-teardown /Developer unmount"]) {
+                return @"诊断结论：RB2_USERREBOOT 已到达 launchd，但仍执行了旧版 RootHide 的重启前副作用；当前构建没有包含 iOS 18 顺序修复。";
+            }
             if (![trace containsString:@"phase complete: temporary jailbreakd stopped before userspace reboot"]) {
                 return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但临时 jailbreakd 没有在重启前完成退出；它仍可能阻塞 launchd teardown。";
             }
@@ -261,7 +274,7 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             BOOL transitionCallObserved = [trace containsString:@"[launchd] post-RB2_USERREBOOT spawn observation"] ||
                                           [trace containsString:@"[launchd] post-RB2_USERREBOOT execve observation"];
             if (!transitionCallObserved) {
-                return @"诊断结论：临时 jailbreakd 已停止且 RB2_USERREBOOT 已转交 launchd，但随后没有调用 __posix_spawn 或 __execve；中断发生在 launchd 内部 teardown。";
+                return @"诊断结论：jbctl 平台授权已验证、旧版 /Developer 提前卸载已跳过、临时 jailbreakd 已停止，RB2_USERREBOOT 也已转交；但 launchd 仍未开始 self-spawn/self-exec，剩余故障位于 iOS 18 的 launchd 内部授权或 teardown。";
             }
             return @"诊断结论：launchd 已收到 RB2_USERREBOOT，并调用了进程替换 API，但目标没有匹配当前 launchd；请查看 post-RB2_USERREBOOT 与 candidate 行。";
         }

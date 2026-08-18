@@ -1,6 +1,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/param.h>
+#include <libproc.h>
+#include <xpc_private.h>
 #include "jbserver_global.h"
 
 #include <libjailbreak/libjailbreak.h>
@@ -24,6 +27,32 @@ bool roothide_domain_allowed(audit_token_t clientToken)
 	}
 
 	return true;
+}
+
+static int roothide_entitlement_bool(audit_token_t *clientToken, const char *entitlement)
+{
+	xpc_object_t value = xpc_copy_entitlement_for_token(entitlement, clientToken);
+	if (!value) return -1;
+
+	int result = -1;
+	if (xpc_get_type(value) == XPC_TYPE_BOOL) {
+		result = xpc_bool_get_value(value) ? 1 : 0;
+	}
+	xpc_release(value);
+	return result;
+}
+
+static int roothide_read_csflags(audit_token_t *clientToken, uint32_t *csFlags)
+{
+	pid_t pid = audit_token_to_pid(*clientToken);
+	int result = csops_audittoken(pid, CS_OPS_STATUS, csFlags, sizeof(*csFlags), clientToken);
+	if (result != 0) {
+		// Keep the ordinary csops fallback for SDK/runtime combinations where
+		// csops_audittoken is unavailable, while the path check below still
+		// prevents a recycled PID from being trusted blindly.
+		result = csops(pid, CS_OPS_STATUS, csFlags, sizeof(*csFlags));
+	}
+	return result;
 }
 
 typedef struct {
@@ -246,6 +275,51 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 		return -1;
 	}
 
+	char callerPath[PATH_MAX] = {0};
+	int callerPathResult = proc_pidpath_audittoken(callerToken, callerPath, sizeof(callerPath));
+	bool expectedCaller = callerPathResult > 0 && string_has_suffix(callerPath, "/basebin/jbctl");
+	if (!expectedCaller) {
+		roothide_trace("[launchd] FAILURE: denied userspace-reboot preparation from unexpected path; pid=%d path_result=%d path=%s",
+		               callerPid, callerPathResult, callerPath[0] ? callerPath : "(unavailable)");
+		return -5;
+	}
+
+	uint32_t csFlagsBefore = 0;
+	int csopsBefore = roothide_read_csflags(callerToken, &csFlagsBefore);
+	int platformEntitlement = roothide_entitlement_bool(callerToken, "platform-application");
+	int rebootEntitlement = roothide_entitlement_bool(callerToken, "com.apple.private.xpc.launchd.userspace-reboot");
+	int watchdogEntitlement = roothide_entitlement_bool(callerToken, "com.apple.private.iowatchdog.user-access");
+	roothide_trace("[launchd] userspace-reboot caller authorization before repair; path=%s csops=%d csflags=0x%08x platform=%d platform_entitlement=%d reboot_entitlement=%d watchdog_entitlement=%d",
+	               callerPath, csopsBefore, csFlagsBefore,
+	               csopsBefore == 0 && (csFlagsBefore & CS_PLATFORM_BINARY) != 0,
+	               platformEntitlement, rebootEntitlement, watchdogEntitlement);
+
+	// RootHide rewrites and re-trusts BaseBin executables.  On iOS 18 that can
+	// leave jbctl running as uid 0 while CS_PLATFORM_BINARY is absent, in which
+	// case reboot3 successfully sends its XPC message but launchd silently
+	// refuses to begin userspace teardown.  Repair the live caller while it is
+	// blocked in this synchronous preflight request, then verify through its
+	// original audit token before allowing the reboot request to be sent.
+	if (csopsBefore != 0 || (csFlagsBefore & CS_PLATFORM_BINARY) == 0) {
+		uint64_t callerProc = proc_find(callerPid);
+		if (!callerProc) {
+			roothide_trace("[launchd] FAILURE: could not resolve jbctl proc for userspace-reboot authorization repair; pid=%d", callerPid);
+			return -6;
+		}
+		proc_csflags_set(callerProc, CS_PLATFORM_BINARY);
+	}
+
+	uint32_t csFlagsAfter = 0;
+	int csopsAfter = roothide_read_csflags(callerToken, &csFlagsAfter);
+	bool callerIsPlatform = csopsAfter == 0 && (csFlagsAfter & CS_PLATFORM_BINARY) != 0;
+	roothide_trace("[launchd] userspace-reboot caller authorization after repair; csops=%d csflags=0x%08x platform=%d mode=%s",
+	               csopsAfter, csFlagsAfter, callerIsPlatform,
+	               rebootEntitlement == 1 ? "entitlement" : "platform-fallback");
+	if (!callerIsPlatform) {
+		roothide_trace("[launchd] FAILURE: jbctl is still not a platform process after userspace-reboot authorization repair");
+		return -7;
+	}
+
 	int spawnHookResult = spawn_hook_install_result();
 	roothide_trace("[launchd] userspace-reboot preflight requested by pid=%d; spawn_hook=%d",
 	               callerPid, spawnHookResult);
@@ -254,13 +328,20 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 		return -2;
 	}
 
-	// Install the speculative execve coverage only immediately before reboot.
-	// Keeping it active throughout first-load Bootstrap destabilizes PID 1 on
-	// iOS 18 when launchd takes an unrelated exec path.
-	int execHookResult = exec_hook_ensure_installed();
-	if (execHookResult != KERN_SUCCESS) {
-		roothide_trace("[launchd] FAILURE: refusing userspace reboot because deferred execve hook installation returned %d", execHookResult);
-		return -3;
+	if (__builtin_available(iOS 18.0, *)) {
+		// The working Dopamine 3.x transition on this OS replaces launchd through
+		// __posix_spawn(POSIX_SPAWN_SETEXEC).  Avoid patching an additional libc
+		// entry point in PID 1 immediately before teardown when no runtime evidence
+		// has shown launchd using it.
+		roothide_trace("[launchd] phase skipped: speculative execve hook on iOS 18; using verified posix_spawn transition path");
+	}
+	else {
+		// Retain the older diagnostic coverage outside the iOS 18 target.
+		int execHookResult = exec_hook_ensure_installed();
+		if (execHookResult != KERN_SUCCESS) {
+			roothide_trace("[launchd] FAILURE: refusing userspace reboot because deferred execve hook installation returned %d", execHookResult);
+			return -3;
+		}
 	}
 
 	// The live-injection jailbreakd is an extra PID 1 child that does not exist

@@ -1,9 +1,13 @@
 #include <libjailbreak/libjailbreak.h>
+#include <libjailbreak/codesign.h>
 #include <mach-o/dyld.h>
 #include <xpc/xpc.h>
+#include <xpc_private.h>
 #include <bsm/libbsm.h>
 #include <libproc.h>
 #include <sandbox.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 #include <substrate.h>
 #include <libjailbreak/jbserver.h>
 #include <litehook.h>
@@ -26,6 +30,19 @@ static bool is_userspace_reboot_message(xpc_object_t message)
 	if (!xpc_dictionary_get_value(message, "handle")) return false;
 	if (xpc_dictionary_get_uint64(message, "handle") != 0) return false;
 	return true;
+}
+
+static int entitlement_bool_for_token(audit_token_t *callerToken, const char *entitlement)
+{
+	xpc_object_t value = xpc_copy_entitlement_for_token(entitlement, callerToken);
+	if (!value) return -1;
+
+	int result = -1;
+	if (xpc_get_type(value) == XPC_TYPE_BOOL) {
+		result = xpc_bool_get_value(value) ? 1 : 0;
+	}
+	xpc_release(value);
+	return result;
 }
 
 int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_object_t *xOut)
@@ -69,12 +86,40 @@ int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_objec
 		if (userspaceRebootMessage) {
 			audit_token_t callerToken = {0};
 			xpc_dictionary_get_audit_token(*xOut, &callerToken);
-			roothide_trace("[launchd] observed RB2_USERREBOOT XPC; caller_pid=%d caller_euid=%d",
-			               audit_token_to_pid(callerToken), audit_token_to_euid(callerToken));
+			pid_t callerPid = audit_token_to_pid(callerToken);
+			char callerPath[PATH_MAX] = {0};
+			int callerPathResult = proc_pidpath_audittoken(&callerToken, callerPath, sizeof(callerPath));
+			uint32_t callerCSFlags = 0;
+			int callerCSResult = csops_audittoken(callerPid, CS_OPS_STATUS, &callerCSFlags, sizeof(callerCSFlags), &callerToken);
+			if (callerCSResult != 0) {
+				callerCSResult = csops(callerPid, CS_OPS_STATUS, &callerCSFlags, sizeof(callerCSFlags));
+			}
+			int platformEntitlement = entitlement_bool_for_token(&callerToken, "platform-application");
+			int rebootEntitlement = entitlement_bool_for_token(&callerToken, "com.apple.private.xpc.launchd.userspace-reboot");
+			int watchdogEntitlement = entitlement_bool_for_token(&callerToken, "com.apple.private.iowatchdog.user-access");
+			struct statfs developerStatus = {0};
+			int developerStatResult = statfs("/Developer", &developerStatus);
+			bool developerIsMounted = developerStatResult == 0 && strcmp(developerStatus.f_mntonname, "/Developer") == 0;
+			roothide_trace("[launchd] observed RB2_USERREBOOT XPC; caller_pid=%d caller_euid=%d path_result=%d path=%s csops=%d csflags=0x%08x platform=%d platform_entitlement=%d reboot_entitlement=%d watchdog_entitlement=%d developer_statfs=%d developer_mounted=%d",
+			               callerPid, audit_token_to_euid(callerToken), callerPathResult,
+			               callerPath[0] ? callerPath : "(unavailable)", callerCSResult, callerCSFlags,
+			               callerCSResult == 0 && (callerCSFlags & CS_PLATFORM_BINARY) != 0,
+			               platformEntitlement, rebootEntitlement, watchdogEntitlement,
+			               developerStatResult, developerIsMounted);
 			spawn_hook_note_userspace_reboot();
 		}
 
-		roothide_handle_xpc_msg(*xOut);
+		if (userspaceRebootMessage && __builtin_available(iOS 18.0, *)) {
+			// RootHide 2.x carries a legacy iOS 15 workaround that force-unmounts
+			// /Developer as soon as launchd receives RB2_USERREBOOT.  Its official
+			// launchd XPC entry does not call that mutator, and ordinary Dopamine
+			// waits until launchd's final self-replacement.  Preserve that ordering
+			// on iOS 18 so launchd can complete its own authorization and teardown.
+			roothide_trace("[launchd] iOS 18 RB2 path: skipped legacy RootHide pre-teardown /Developer unmount");
+		}
+		else {
+			roothide_handle_xpc_msg(*xOut);
+		}
 		int jbserverResult = jbserver_received_xpc_message(&gGlobalServer, *xOut);
 		if (userspaceRebootMessage) {
 			roothide_trace("[launchd] RB2_USERREBOOT forwarding decision; xpc_result=%d jbserver_result=%d consumed=%d",

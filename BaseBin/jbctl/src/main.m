@@ -1,4 +1,5 @@
 #import <libjailbreak/libjailbreak.h>
+#import <libjailbreak/codesign.h>
 #import <libjailbreak/jbclient_xpc.h>
 #import <libjailbreak/jbclient_mach.h>
 #import <libjailbreak/stock_fixes.h>
@@ -47,12 +48,31 @@ static int PerformUserspaceReboot(void)
 {
 	RootHideJbctlTrace("reboot_userspace entered; pid=%d ppid=%d uid=%d euid=%d gid=%d egid=%d",
 	                   getpid(), getppid(), getuid(), geteuid(), getgid(), getegid());
+	uint32_t csFlagsBefore = 0;
+	errno = 0;
+	int csopsBefore = csops(getpid(), CS_OPS_STATUS, &csFlagsBefore, sizeof(csFlagsBefore));
+	int csopsBeforeErrno = errno;
+	RootHideJbctlTrace("authorization before preflight; csops=%d errno=%d csflags=0x%08x platform=%d",
+	                   csopsBefore, csopsBeforeErrno, csFlagsBefore,
+	                   csopsBefore == 0 && (csFlagsBefore & CS_PLATFORM_BINARY) != 0);
 	RootHideJbctlTrace("requesting launchd userspace-reboot preflight");
 	int preparationResult = jbclient_prepare_userspace_reboot();
 	RootHideJbctlTrace("launchd userspace-reboot preflight returned %d", preparationResult);
 	if (preparationResult != 0) {
 		RootHideJbctlTrace("FAILURE: refusing reboot because launchd preflight returned %d", preparationResult);
 		return 70;
+	}
+
+	uint32_t csFlagsAfter = 0;
+	errno = 0;
+	int csopsAfter = csops(getpid(), CS_OPS_STATUS, &csFlagsAfter, sizeof(csFlagsAfter));
+	int csopsAfterErrno = errno;
+	bool isPlatformAfter = csopsAfter == 0 && (csFlagsAfter & CS_PLATFORM_BINARY) != 0;
+	RootHideJbctlTrace("authorization after preflight; csops=%d errno=%d csflags=0x%08x platform=%d",
+	                   csopsAfter, csopsAfterErrno, csFlagsAfter, isPlatformAfter);
+	if (!isPlatformAfter) {
+		RootHideJbctlTrace("FAILURE: refusing reboot because jbctl is not a platform process after preflight");
+		return 71;
 	}
 
 	usleep(10000);
