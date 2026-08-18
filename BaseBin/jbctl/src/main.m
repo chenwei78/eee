@@ -47,11 +47,11 @@ static int PerformUserspaceReboot(void)
 {
 	RootHideJbctlTrace("reboot_userspace entered; pid=%d ppid=%d uid=%d euid=%d gid=%d egid=%d",
 	                   getpid(), getppid(), getuid(), geteuid(), getgid(), getegid());
-	RootHideJbctlTrace("requesting explicit launchd primitive preparation");
+	RootHideJbctlTrace("requesting launchd userspace-reboot preflight");
 	int preparationResult = jbclient_prepare_userspace_reboot();
-	RootHideJbctlTrace("explicit launchd primitive preparation returned %d", preparationResult);
+	RootHideJbctlTrace("launchd userspace-reboot preflight returned %d", preparationResult);
 	if (preparationResult != 0) {
-		RootHideJbctlTrace("FAILURE: refusing reboot because primitive preparation returned %d", preparationResult);
+		RootHideJbctlTrace("FAILURE: refusing reboot because launchd preflight returned %d", preparationResult);
 		return 70;
 	}
 

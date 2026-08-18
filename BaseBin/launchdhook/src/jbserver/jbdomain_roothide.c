@@ -7,7 +7,6 @@
 #include <libjailbreak/roothider.h>
 #include <libjailbreak/codesign.h>
 #include "../roothide_trace.h"
-#include "../boomerang.h"
 #include "../spawn_hook.h"
 
 int roothide_unsupport_request()
@@ -242,23 +241,19 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 		return -1;
 	}
 
-	roothide_trace("[launchd] phase: explicit userspace-reboot preparation requested by pid=%d", callerPid);
-	int result = boomerang_stashPrimitives();
-	if (result == 0) {
-		int hookInstallResult = spawn_hook_install_result();
-		bool hookObservedBoomerang = spawn_hook_observed_boomerang();
-		roothide_trace("[launchd] userspace-reboot spawn-hook verification; install_result=%d observed_boomerang=%d",
-		               hookInstallResult, hookObservedBoomerang);
-		if (hookInstallResult != KERN_SUCCESS || !hookObservedBoomerang) {
-			roothide_trace("[launchd] FAILURE: refusing userspace reboot because the launchd spawn hook is not verified");
-			return -2;
-		}
-		roothide_trace("[launchd] phase complete: explicit userspace-reboot preparation and spawn-hook verification");
+	int spawnHookResult = spawn_hook_install_result();
+	int execHookResult = exec_hook_install_result();
+	roothide_trace("[launchd] userspace-reboot preflight requested by pid=%d; spawn_hook=%d execve_hook=%d",
+	               callerPid, spawnHookResult, execHookResult);
+	if (spawnHookResult != KERN_SUCCESS || execHookResult != KERN_SUCCESS) {
+		roothide_trace("[launchd] FAILURE: refusing userspace reboot because process replacement hooks are not installed");
+		return -2;
 	}
-	else {
-		roothide_trace("[launchd] FAILURE: explicit userspace-reboot preparation returned %d", result);
-	}
-	return result;
+
+	// Primitive stashing deliberately remains in the final self-spawn/self-exec
+	// hook.  A persistent boomerang child must not exist during service teardown.
+	roothide_trace("[launchd] phase complete: userspace-reboot preflight; primitive stashing deferred to launchd replacement");
+	return 0;
 }
 
 struct jbserver_domain gRootHideDomain = {

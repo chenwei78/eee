@@ -30,7 +30,7 @@ extern bool gFreeBootLogoBeforeBackboardd;
 void free_boot_logo(void);
 
 static int gSpawnHookInstallResult = KERN_FAILURE;
-static bool gSpawnHookObservedBoomerang = false;
+static int gExecHookInstallResult = KERN_FAILURE;
 static volatile int gPostUserspaceRebootSpawnTraceRemaining = 0;
 static volatile int gPostUserspaceRebootSpawnTraceSequence = 0;
 
@@ -39,9 +39,9 @@ int spawn_hook_install_result(void)
 	return gSpawnHookInstallResult;
 }
 
-bool spawn_hook_observed_boomerang(void)
+int exec_hook_install_result(void)
 {
-	return gSpawnHookObservedBoomerang;
+	return gExecHookInstallResult;
 }
 
 void spawn_hook_note_userspace_reboot(void)
@@ -74,6 +74,38 @@ void ensure_fakelib_mounted(void)
 	}
 }
 
+static int prepare_userspace_reboot_transition(void)
+{
+	// Only run this once launchd is replacing itself.  Starting the long-lived
+	// boomerang process earlier can keep userspace teardown from reaching this
+	// final replacement stage.
+	gInEarlyBoot = true;
+	ensure_fakelib_mounted();
+
+	int stashResult = boomerang_stashPrimitives();
+	if (stashResult != 0) {
+		roothide_trace("[boomerang] FAILURE: refusing userspace reboot because primitive stashing returned %d", stashResult);
+		gInEarlyBoot = false;
+		return EIO;
+	}
+
+	hookd_provider_teardown();
+	unmount("/Developer", MNT_FORCE);
+
+	const char *stagedJailbreakUpdate = getenv("STAGED_JAILBREAK_UPDATE");
+	if (stagedJailbreakUpdate) {
+		int updateResult = jbupdate_basebin(stagedJailbreakUpdate);
+		if (updateResult != 0) {
+			char message[1000];
+			snprintf(message, sizeof(message), "Failed updating basebin (error %d).", updateResult);
+			abort_with_reason(7, 1, message, 0);
+		}
+		unsetenv("STAGED_JAILBREAK_UPDATE");
+	}
+
+	return 0;
+}
+
 int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 					   struct _posix_spawn_args_desc *desc,
 					   char *const argv[restrict],
@@ -97,6 +129,17 @@ static short spawn_flags(struct _posix_spawn_args_desc *desc)
 		if (posix_spawnattr_getflags(&attr, &flags) != 0) flags = 0;
 	}
 	return flags;
+}
+
+static void trace_post_reboot_transition_call(const char *kind, const char *path, short flags, char *const argv[])
+{
+	if (getpid() != 1 || gPostUserspaceRebootSpawnTraceRemaining <= 0) return;
+
+	int sequence = ++gPostUserspaceRebootSpawnTraceSequence;
+	gPostUserspaceRebootSpawnTraceRemaining--;
+	roothide_trace("[launchd] post-RB2_USERREBOOT %s observation #%d; path=%s flags=0x%x argv0=%s",
+	               kind, sequence, path ? path : "(null)", (unsigned short)flags,
+	               argv && argv[0] ? argv[0] : "(null)");
 }
 
 static const char *launchd_self_spawn_match(const char *path,
@@ -138,13 +181,7 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 					   char *const argv[restrict],
 					   char *const envp[restrict])
 {
-	if (getpid() == 1 && gPostUserspaceRebootSpawnTraceRemaining > 0) {
-		int sequence = ++gPostUserspaceRebootSpawnTraceSequence;
-		gPostUserspaceRebootSpawnTraceRemaining--;
-		roothide_trace("[launchd] post-RB2_USERREBOOT spawn observation #%d; path=%s flags=0x%x argv0=%s",
-		               sequence, path ? path : "(null)", (unsigned short)spawn_flags(desc),
-		               argv && argv[0] ? argv[0] : "(null)");
-	}
+	trace_post_reboot_transition_call("spawn", path, spawn_flags(desc), argv);
 
 	if (path) {
 		char executablePath[PATH_MAX] = {0};
@@ -163,44 +200,14 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 			roothide_trace("[launchd] userspace-reboot self-spawn matched via %s; DYLD_INSERT_LIBRARIES=%s BOOMERANG_PID=%s",
 			               matchReason, getenv("DYLD_INSERT_LIBRARIES") ?: "(unset)", getenv("BOOMERANG_PID") ?: "(unset)");
 
-			// We are back in "early boot" for the remainder of this launchd instance
-			// Mainly so we don't lock up while spawning boomerang
-			gInEarlyBoot = true;
-
-			// If the jailbreak is currently hidden, fakelib is not mounted
-			// It needs to be mounted to regain launchd code execution after the userspace reboot
-			ensure_fakelib_mounted();
-
 #if LOG_PROCESS_LAUNCHES
 			FILE *f = fopen("/var/mobile/launch_log.txt", "a");
 			fprintf(f, "==== USERSPACE REBOOT ====\n");
 			fclose(f);
 #endif
 
-			// Before the userspace reboot, we want to stash the primitives into boomerang
-			int stashResult = boomerang_stashPrimitives();
-			if (stashResult != 0) {
-				roothide_trace("[boomerang] FAILURE: refusing userspace reboot because primitive stashing returned %d", stashResult);
-				gInEarlyBoot = false;
-				return EIO;
-			}
-
-			hookd_provider_teardown();
-
-			// Fix Xcode debugging being broken after the userspace reboot
-			unmount("/Developer", MNT_FORCE);
-
-			// If there is a pending jailbreak update, apply it now
-			const char *stagedJailbreakUpdate = getenv("STAGED_JAILBREAK_UPDATE");
-			if (stagedJailbreakUpdate) {
-				int r = jbupdate_basebin(stagedJailbreakUpdate);
-				if (r != 0) {
-					char msg[1000];
-					snprintf(msg, 1000, "Failed updating basebin (error %d).", r);
-					abort_with_reason(7, 1, msg, 0);
-				}
-				unsetenv("STAGED_JAILBREAK_UPDATE");
-			}
+			int preparationResult = prepare_userspace_reboot_transition();
+			if (preparationResult != 0) return preparationResult;
 
 			// Always use environ instead of envp, as boomerang_stashPrimitives calls setenv
 			// setenv / unsetenv can sometimes cause environ to get reallocated
@@ -252,12 +259,10 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 	}
 #endif
 
-	// The boomerang handoff child is spawned synchronously while launchd is
-	// servicing the explicit reboot-preparation request.  It is already in the
-	// BaseBin trust cache and must not recurse through normal child patching.
+	// The handoff child is already in the BaseBin trust cache and must not
+	// recurse through normal child patching while launchd replaces itself.
 	if (path && string_has_suffix(path, "/basebin/boomerang")) {
 		roothide_trace("[launchd] spawn hook observed boomerang handoff child; bypassing normal child patching");
-		gSpawnHookObservedBoomerang = true;
 		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
 	}
 
@@ -298,9 +303,45 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 	return posix_spawn_hook_shared(pid, path, desc, argv, envp, __posix_spawn_orig_wrapper, systemwide_trust_file_by_path, platform_set_process_debugged, jbsetting(jetsamMultiplier));
 }
 
+int __execve_hook(const char *path, char *const argv[], char *const envp[])
+{
+	trace_post_reboot_transition_call("execve", path, 0, argv);
+
+	if (path) {
+		char executablePath[PATH_MAX] = {0};
+		short unusedFlags = 0;
+		const char *matchReason = launchd_self_spawn_match(path, NULL, executablePath, &unusedFlags);
+		if (matchReason || (getpid() == 1 && string_has_suffix(path, "/launchd"))) {
+			roothide_trace("[launchd] self-exec candidate; path=%s self=%s match=%s argv0=%s",
+			               path, executablePath[0] ? executablePath : "(unavailable)",
+			               matchReason ? matchReason : "none", argv && argv[0] ? argv[0] : "(null)");
+		}
+
+		if (matchReason) {
+			roothide_trace("[launchd] userspace-reboot self-exec matched via %s; DYLD_INSERT_LIBRARIES=%s BOOMERANG_PID=%s",
+			               matchReason, getenv("DYLD_INSERT_LIBRARIES") ?: "(unset)", getenv("BOOMERANG_PID") ?: "(unset)");
+			int preparationResult = prepare_userspace_reboot_transition();
+			if (preparationResult != 0) {
+				errno = preparationResult;
+				return -1;
+			}
+
+			int execResult = __execve_inline(path, argv, environ);
+			int savedErrno = errno;
+			gInEarlyBoot = false;
+			roothide_trace("[launchd] FAILURE: userspace-reboot self-exec syscall returned %d errno=%d", execResult, savedErrno);
+			errno = savedErrno;
+			return execResult;
+		}
+	}
+
+	return execve_hook_shared(path, argv, envp, (void *)__execve_inline, systemwide_trust_file_by_path);
+}
+
 void initSpawnHooks(void)
 {
 	gSpawnHookInstallResult = litehook_hook_function(__posix_spawn, __posix_spawn_hook);
-	roothide_trace("[launchd] spawn hook installation returned %d; source=%p target=%p",
-	               gSpawnHookInstallResult, (void *)__posix_spawn, (void *)__posix_spawn_hook);
+	gExecHookInstallResult = litehook_hook_function(__execve, __execve_hook);
+	roothide_trace("[launchd] process replacement hook installation; spawn=%d execve=%d",
+	               gSpawnHookInstallResult, gExecHookInstallResult);
 }

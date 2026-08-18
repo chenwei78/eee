@@ -5,7 +5,7 @@
 
 void initSpawnHooks(void);
 int spawn_hook_install_result(void);
-bool spawn_hook_observed_boomerang(void);
+int exec_hook_install_result(void);
 void spawn_hook_note_userspace_reboot(void);
 
 #endif
