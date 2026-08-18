@@ -17,5 +17,6 @@ int jbclient_trust_executable_recurse(const char *executablePath, xpc_object_t p
 int jbclient_trust_library_recurse(const char *libraryPath, void *addressInCaller);
 bool jbclient_dyld_patch_enabled(void);
 int jbclient_set_dyld_patch(bool enabled);
+int jbclient_prepare_userspace_reboot(void);
 
 #endif

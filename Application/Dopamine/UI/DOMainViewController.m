@@ -234,7 +234,35 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
         }
     }
     else if ([trace containsString:@"[app] phase: invoking userspace reboot"]) {
-        return @"诊断结论：App 已请求用户空间重启，但新的 launchd 构造函数没有进入。";
+        if (![trace containsString:@"[jbctl] reboot_userspace entered"]) {
+            return @"诊断结论：App 已进入重启阶段，但 jbctl 没有开始执行，问题在 jbctl 的提权、spawn 或日志环境传递。";
+        }
+        if (![trace containsString:@"[jbctl] explicit launchd primitive preparation returned 0"]) {
+            return @"诊断结论：jbctl 已启动，但 launchd 的显式 primitive 准备请求没有成功返回；请看最后一条 jbctl/launchd/boomerang 日志。";
+        }
+
+        BOOL primitivesStashed = [trace containsString:@"[boomerang] phase complete: primitives stashed for userspace reboot"] ||
+                                 [trace containsString:@"[boomerang] primitives already stashed in live handoff process"];
+        if (!primitivesStashed) {
+            return @"诊断结论：launchd 接受了显式准备请求，但 boomerang 没有确认 primitive 已保存。";
+        }
+
+        BOOL rebootXPCObserved = [trace containsString:@"[launchd] observed RB2_USERREBOOT XPC"];
+        BOOL selfSpawnMatched = [trace containsString:@"[launchd] userspace-reboot self-spawn matched"];
+        if ([trace containsString:@"[jbctl] reboot3 returned 0"] && !rebootXPCObserved) {
+            return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
+        }
+        if (rebootXPCObserved && !selfSpawnMatched) {
+            return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但没有进入已识别的 self-spawn 分支；post-RB2_USERREBOOT 行会列出随后最多 12 次 spawn，若完全没有该行则重启没有经过 __posix_spawn。";
+        }
+        if (selfSpawnMatched) {
+            return @"诊断结论：旧 launchd 已识别用户空间重启 self-spawn，但新 launchd 没加载 launchdhook；问题已定位到 DYLD_INSERT_LIBRARIES/环境继承或新进程装载阶段。";
+        }
+        if ([trace containsString:@"[jbctl] calling reboot3 with RB2_USERREBOOT"] &&
+            ![trace containsString:@"[jbctl] reboot3 returned"]) {
+            return @"诊断结论：primitive 已保存，jbctl 已进入 reboot3 且没有返回，但新 launchd 构造函数仍未进入。";
+        }
+        return @"诊断结论：primitive 已保存，但用户空间重启没有进入新的 launchd；以最后一条 jbctl、XPC 或 self-spawn 日志为准。";
     }
 
     if ([trace containsString:@"phase: gathering system information"] && ![trace containsString:@"phase complete: gathering system information"]) {

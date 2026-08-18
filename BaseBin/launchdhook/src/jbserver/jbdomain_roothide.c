@@ -7,6 +7,8 @@
 #include <libjailbreak/roothider.h>
 #include <libjailbreak/codesign.h>
 #include "../roothide_trace.h"
+#include "../boomerang.h"
+#include "../spawn_hook.h"
 
 int roothide_unsupport_request()
 {
@@ -231,6 +233,34 @@ static int roothide_set_dyld_patch(audit_token_t *callerToken, bool enabled)
 	return 0;
 }
 
+static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
+{
+	pid_t callerPid = audit_token_to_pid(*callerToken);
+	uid_t callerUid = audit_token_to_euid(*callerToken);
+	if (callerUid != 0) {
+		roothide_trace("[launchd] FAILURE: denied userspace-reboot preparation from pid=%d euid=%d", callerPid, callerUid);
+		return -1;
+	}
+
+	roothide_trace("[launchd] phase: explicit userspace-reboot preparation requested by pid=%d", callerPid);
+	int result = boomerang_stashPrimitives();
+	if (result == 0) {
+		int hookInstallResult = spawn_hook_install_result();
+		bool hookObservedBoomerang = spawn_hook_observed_boomerang();
+		roothide_trace("[launchd] userspace-reboot spawn-hook verification; install_result=%d observed_boomerang=%d",
+		               hookInstallResult, hookObservedBoomerang);
+		if (hookInstallResult != KERN_SUCCESS || !hookObservedBoomerang) {
+			roothide_trace("[launchd] FAILURE: refusing userspace reboot because the launchd spawn hook is not verified");
+			return -2;
+		}
+		roothide_trace("[launchd] phase complete: explicit userspace-reboot preparation and spawn-hook verification");
+	}
+	else {
+		roothide_trace("[launchd] FAILURE: explicit userspace-reboot preparation returned %d", result);
+	}
+	return result;
+}
+
 struct jbserver_domain gRootHideDomain = {
 	.permissionHandler = roothide_domain_allowed,
 	.actions = {
@@ -317,6 +347,14 @@ struct jbserver_domain gRootHideDomain = {
             .args = (jbserver_arg[]) {
                     { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
                     { .name = "enabled", .type = JBS_TYPE_BOOL, .out = false },
+                    { 0 },
+            },
+        },
+		//JBS_ROOTHIDE_PREPARE_USERSPACE_REBOOT
+        {
+            .handler = roothide_prepare_userspace_reboot,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
                     { 0 },
             },
         },

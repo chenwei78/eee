@@ -7,9 +7,62 @@
 #import <Foundation/Foundation.h>
 #import <CoreServices/LSApplicationProxy.h>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 int reboot3(uint64_t flags, ...);
 #define RB2_USERREBOOT (0x2000000000000000llu)
 extern char **environ;
+
+static void RootHideJbctlTrace(const char *format, ...)
+{
+	const char *tracePath = getenv("ROOTHIDE_JBCTL_TRACE_PATH");
+	if (!tracePath || !tracePath[0] || !format) return;
+
+	int trace = open(tracePath, O_WRONLY | O_APPEND);
+	if (trace < 0) return;
+
+	struct stat traceStatus = {0};
+	if (fstat(trace, &traceStatus) != 0 || traceStatus.st_size >= 256 * 1024) {
+		close(trace);
+		return;
+	}
+
+	char message[1024] = {0};
+	va_list args;
+	va_start(args, format);
+	vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	dprintf(trace, "[jbctl] %s\n", message);
+	fsync(trace);
+	close(trace);
+}
+
+static int PerformUserspaceReboot(void)
+{
+	RootHideJbctlTrace("reboot_userspace entered; pid=%d ppid=%d uid=%d euid=%d gid=%d egid=%d",
+	                   getpid(), getppid(), getuid(), geteuid(), getgid(), getegid());
+	RootHideJbctlTrace("requesting explicit launchd primitive preparation");
+	int preparationResult = jbclient_prepare_userspace_reboot();
+	RootHideJbctlTrace("explicit launchd primitive preparation returned %d", preparationResult);
+	if (preparationResult != 0) {
+		RootHideJbctlTrace("FAILURE: refusing reboot because primitive preparation returned %d", preparationResult);
+		return 70;
+	}
+
+	usleep(10000);
+	errno = 0;
+	RootHideJbctlTrace("calling reboot3 with RB2_USERREBOOT");
+	int result = reboot3(RB2_USERREBOOT);
+	int savedErrno = errno;
+	RootHideJbctlTrace("reboot3 returned %d errno=%d (%s)", result, savedErrno, strerror(savedErrno));
+	return result;
+}
 
 void print_usage(void)
 {
@@ -141,8 +194,7 @@ int main(int argc, char* argv[])
 		}
 	}
 	else if (!strcmp(cmd, "reboot_userspace")) {
-		usleep(10000);
-		return reboot3(RB2_USERREBOOT);
+		return PerformUserspaceReboot();
 	}
 	else if (!strcmp(cmd, "respring")) {
 		usleep(10000);
@@ -206,8 +258,7 @@ int main(int argc, char* argv[])
 		int64_t result = jbclient_platform_stage_jailbreak_update(updateFile);
 		if (result == 0) {
 			printf("Staged update for installation during the next userspace reboot, userspace rebooting now...\n");
-			usleep(10000);
-			return reboot3(RB2_USERREBOOT);
+			return PerformUserspaceReboot();
 		}
 		else {
 			printf("Staging update failed with error code %lld\n", result);

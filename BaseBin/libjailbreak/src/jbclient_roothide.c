@@ -261,3 +261,15 @@ int jbclient_set_dyld_patch(bool enabled)
 	}
 	return -1;
 }
+
+int jbclient_prepare_userspace_reboot(void)
+{
+	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_PREPARE_USERSPACE_REBOOT, NULL);
+	if (xreply) {
+		int64_t result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_release(xreply);
+		return (int)result;
+	}
+
+	return -1;
+}

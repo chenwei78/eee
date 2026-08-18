@@ -969,7 +969,11 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
 {
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
     RootHideAppendTrace(@"phase: invoking userspace reboot");
+    NSString *tracePath = RootHideLaunchdTracePath();
+    setenv("ROOTHIDE_JBCTL_TRACE_PATH", tracePath.fileSystemRepresentation, 1);
+    RootHideAppendTrace(@"phase complete: configured jbctl userspace-reboot trace channel");
     int rebootResult = [[DOEnvironmentManager sharedManager] rebootUserspace];
+    unsetenv("ROOTHIDE_JBCTL_TRACE_PATH");
     if (rebootResult != 0) {
         DOEnvironmentManager *environmentManager = [DOEnvironmentManager sharedManager];
         [environmentManager setJailbroken:NO withVersion:environmentManager.appVersion];

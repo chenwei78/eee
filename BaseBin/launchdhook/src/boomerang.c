@@ -12,6 +12,9 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include "roothide_trace.h"
 
 int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *__restrict attr, mach_port_t portarray[], uint32_t count);
@@ -21,7 +24,9 @@ int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *__restrict attr, 
 #define JB_PRIMITIVE_STORAGE_RETRIEVE_PHYSRW 1
 #define JB_PRIMITIVE_STORAGE_RETRIEVE_KCALL 2
 
-int boomerang_stashPrimitives(void)
+static pthread_mutex_t gBoomerangStashLock = PTHREAD_MUTEX_INITIALIZER;
+
+static int boomerang_stashPrimitivesOnce(void)
 {
 	roothide_trace("[boomerang] phase: stashing primitives for userspace reboot");
 	dispatch_semaphore_t boomerangDone = dispatch_semaphore_create(0);
@@ -128,6 +133,31 @@ int boomerang_stashPrimitives(void)
 	setenv("BOOMERANG_PID", pidBuf, 1);
 	roothide_trace("[boomerang] phase complete: primitives stashed for userspace reboot");
 	return 0;
+}
+
+int boomerang_stashPrimitives(void)
+{
+	pthread_mutex_lock(&gBoomerangStashLock);
+
+	const char *existingPidString = getenv("BOOMERANG_PID");
+	if (existingPidString && existingPidString[0]) {
+		char *end = NULL;
+		errno = 0;
+		long existingPid = strtol(existingPidString, &end, 10);
+		bool validPid = errno == 0 && end && end[0] == '\0' && existingPid > 1 && existingPid <= INT_MAX;
+		if (validPid && (kill((pid_t)existingPid, 0) == 0 || errno == EPERM)) {
+			roothide_trace("[boomerang] primitives already stashed in live handoff process; pid=%ld", existingPid);
+			pthread_mutex_unlock(&gBoomerangStashLock);
+			return 0;
+		}
+
+		roothide_trace("[boomerang] stale handoff state found; pid=%s, creating a replacement", existingPidString);
+		unsetenv("BOOMERANG_PID");
+	}
+
+	int result = boomerang_stashPrimitivesOnce();
+	pthread_mutex_unlock(&gBoomerangStashLock);
+	return result;
 }
 
 int boomerang_recoverPrimitives(bool firstRetrieval, bool shouldEndBoomerang)
