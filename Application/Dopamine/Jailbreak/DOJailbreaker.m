@@ -944,6 +944,14 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
         RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: final jailbreak cleanup: %@", (*errOut).localizedDescription]);
         return;
     }
+
+    // DOEnvironmentManager caches the launch-time jailbreak state with
+    // dispatch_once.  This process started unjailbroken, so refresh that cache
+    // only after every setup step has succeeded.  finalize can then borrow root
+    // and actually spawn jbctl after cleanUpPostExploitation drops us to mobile.
+    DOEnvironmentManager *environmentManager = [DOEnvironmentManager sharedManager];
+    [environmentManager setJailbroken:YES withVersion:environmentManager.appVersion];
+    RootHideAppendTrace(@"phase complete: refreshed in-process jailbreak state");
     RootHideAppendTrace(@"phase complete: jailbreak setup; userspace reboot requested next");
 
 
@@ -961,7 +969,15 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
 {
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
     RootHideAppendTrace(@"phase: invoking userspace reboot");
-    [[DOEnvironmentManager sharedManager] rebootUserspace];
+    int rebootResult = [[DOEnvironmentManager sharedManager] rebootUserspace];
+    if (rebootResult != 0) {
+        DOEnvironmentManager *environmentManager = [DOEnvironmentManager sharedManager];
+        [environmentManager setJailbroken:NO withVersion:environmentManager.appVersion];
+        RootHideAppendTrace([NSString stringWithFormat:@"FAILURE: userspace reboot command returned %d", rebootResult]);
+    }
+    else {
+        RootHideAppendTrace(@"phase complete: userspace reboot command accepted");
+    }
 }
 
 - (IOSurfaceRef)allocatePurpleGfxMemWithSize:(size_t)size

@@ -447,10 +447,11 @@ extern char **environ;
     [self spawnJbctlAsRootWithArgs:@[@"respring"]];
 }
 
-- (void)rebootUserspace
+- (int)rebootUserspace
 {
     int result = [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
     if (result != 0) NSLog(@"reboot_userspace returned %d", result);
+    return result;
 }
 
 - (void)refreshJailbreakApps
