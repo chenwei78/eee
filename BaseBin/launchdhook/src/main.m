@@ -81,8 +81,13 @@ void free_boot_logo(void)
 int (*sysctlbyname_orig)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 {
+	bool userspaceReboot = !strcmp(name, "kern.willuserspacereboot");
+	if (userspaceReboot) {
+		roothide_trace("[launchd] kern.willuserspacereboot entered");
+	}
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
-	if (!strcmp(name, "kern.willuserspacereboot")) {
+	if (userspaceReboot) {
+		roothide_trace("[launchd] kern.willuserspacereboot returned; sysctl_result=%d", r);
 		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
 	}
 	return r;

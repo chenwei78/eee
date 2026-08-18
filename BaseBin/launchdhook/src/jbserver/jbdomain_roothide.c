@@ -345,26 +345,12 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 		}
 	}
 
-	// The live-injection jailbreakd is an extra PID 1 child that does not exist
-	// in the working rootless flow. Stop and reap it before iOS 18 begins
-	// userspace teardown, removing that extra process from the transition.
+	// Let launchd terminate its own children as part of userspace teardown.
+	// Killing and reaping the temporary jailbreakd synchronously from this XPC
+	// handler mutates PID 1's child/job state immediately before the reboot
+	// request, unlike the working stock Dopamine sequence.
 	if (__builtin_available(iOS 18.0, *)) {
-		pid_t jailbreakdPid = -1;
-		int jailbreakdStatus = -1;
-		roothide_trace("[launchd] phase: stopping temporary jailbreakd before userspace reboot");
-		int stopResult = jailbreakdStopForUserspaceReboot(&jailbreakdPid, &jailbreakdStatus);
-		bool statusValid = jailbreakdStatus >= 0;
-		bool exited = statusValid && WIFEXITED(jailbreakdStatus);
-		bool signaled = statusValid && WIFSIGNALED(jailbreakdStatus);
-		roothide_trace("[launchd] temporary jailbreakd stop returned %d; pid=%d status_valid=%d status=%d exited=%d exit_code=%d signaled=%d signal=%d",
-		               stopResult, jailbreakdPid, statusValid, jailbreakdStatus,
-		               exited, exited ? WEXITSTATUS(jailbreakdStatus) : -1,
-		               signaled, signaled ? WTERMSIG(jailbreakdStatus) : 0);
-		if (stopResult != 0) {
-			roothide_trace("[launchd] FAILURE: refusing userspace reboot because temporary jailbreakd teardown failed");
-			return -4;
-		}
-		roothide_trace("[launchd] phase complete: temporary jailbreakd stopped before userspace reboot");
+		roothide_trace("[launchd] phase deferred: temporary jailbreakd termination to launchd userspace teardown");
 	}
 
 	// Primitive stashing deliberately remains in the final self-spawn/self-exec

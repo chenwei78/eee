@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -73,6 +74,47 @@ static int PerformUserspaceReboot(void)
 	if (!isPlatformAfter) {
 		RootHideJbctlTrace("FAILURE: refusing reboot because jbctl is not a platform process after preflight");
 		return 71;
+	}
+
+	if (@available(iOS 18.0, *)) {
+		// Use Apple's platform-signed launchctl as the final reboot requester on
+		// iOS 18.  The custom RootHide jbctl has valid runtime entitlements, but
+		// launchd can still silently decline its reboot3 request based on private
+		// caller-identity policy that csops and entitlement queries do not expose.
+		errno = 0;
+		int gidResult = setgid(0);
+		int gidErrno = errno;
+		RootHideJbctlTrace("stock launchctl identity preparation; setgid=%d errno=%d uid=%d euid=%d gid=%d egid=%d",
+		                   gidResult, gidErrno, getuid(), geteuid(), getgid(), getegid());
+
+		const char *launchctlPath = "/bin/launchctl";
+		if (access(launchctlPath, X_OK) != 0) launchctlPath = "/usr/bin/launchctl";
+		if (access(launchctlPath, X_OK) != 0) {
+			RootHideJbctlTrace("FAILURE: stock launchctl is unavailable at /bin/launchctl and /usr/bin/launchctl");
+			return 72;
+		}
+
+		// systemhook's execve wrapper recognizes _SafeMode and removes its own
+		// DYLD insertion before entering the stock executable.  This keeps the
+		// launchctl audit identity and code-signing state entirely Apple-owned.
+		unsetenv("DYLD_INSERT_LIBRARIES");
+		unsetenv("DYLD_IN_CACHE");
+		unsetenv("DISABLE_TWEAKS");
+		unsetenv("ROOTHIDE_BOOTSTRAP_RECURSIVE_TRUST");
+		unsetenv("ROOTHIDE_BOOTSTRAP_TRUST_ONLY");
+		errno = 0;
+		int safeModeResult = setenv("_SafeMode", "1", 1);
+		int safeModeErrno = errno;
+		RootHideJbctlTrace("stock launchctl environment preparation; safe_mode=%d errno=%d", safeModeResult, safeModeErrno);
+		if (safeModeResult != 0) return 73;
+		RootHideJbctlTrace("executing stock launchctl userspace reboot; path=%s", launchctlPath);
+		char *const launchctlArgv[] = { (char *)launchctlPath, "reboot", "userspace", NULL };
+		errno = 0;
+		int execResult = execve(launchctlPath, launchctlArgv, environ);
+		int execErrno = errno;
+		unsetenv("_SafeMode");
+		RootHideJbctlTrace("FAILURE: stock launchctl exec returned %d errno=%d (%s)", execResult, execErrno, strerror(execErrno));
+		return 74;
 	}
 
 	usleep(10000);

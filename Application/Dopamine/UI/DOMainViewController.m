@@ -242,10 +242,26 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
         }
 
         BOOL rebootXPCObserved = [trace containsString:@"[launchd] observed RB2_USERREBOOT XPC"];
+        BOOL stockLaunchctlRequested = [trace containsString:@"[jbctl] executing stock launchctl userspace reboot"];
+        __block BOOL stockLaunchctlObserved = NO;
+        [trace enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+            if ([line containsString:@"[launchd] observed RB2_USERREBOOT XPC"] &&
+                ([line containsString:@" path=/bin/launchctl "] || [line containsString:@" path=/usr/bin/launchctl "]) &&
+                [line containsString:@" csops=0"] && [line containsString:@" platform=1 platform_entitlement="]) {
+                stockLaunchctlObserved = YES;
+                *stop = YES;
+            }
+        }];
         BOOL replacementMatched = [trace containsString:@"[launchd] userspace-reboot self-spawn matched"] ||
                                   [trace containsString:@"[launchd] userspace-reboot self-exec matched"];
         if ([trace containsString:@"[jbctl] reboot3 returned 0"] && !rebootXPCObserved) {
             return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
+        }
+        if (stockLaunchctlRequested && !rebootXPCObserved) {
+            return @"诊断结论：jbctl 已切换到苹果签名的 launchctl，但 launchd 没观察到其 RB2_USERREBOOT；请查看 launchctl 的退出状态。";
+        }
+        if (stockLaunchctlRequested && rebootXPCObserved && !stockLaunchctlObserved) {
+            return @"诊断结论：launchd 收到了 RB2_USERREBOOT，但审计令牌中的调用方不是已验证的平台版系统 launchctl；请查看 observed RB2_USERREBOOT 行。";
         }
         if (rebootXPCObserved && !replacementMatched) {
             __block BOOL callerAuthorizationVerified = NO;
@@ -261,8 +277,10 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             if (![trace containsString:@"iOS 18 RB2 path: skipped legacy RootHide pre-teardown /Developer unmount"]) {
                 return @"诊断结论：RB2_USERREBOOT 已到达 launchd，但仍执行了旧版 RootHide 的重启前副作用；当前构建没有包含 iOS 18 顺序修复。";
             }
-            if (![trace containsString:@"phase complete: temporary jailbreakd stopped before userspace reboot"]) {
-                return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但临时 jailbreakd 没有在重启前完成退出；它仍可能阻塞 launchd teardown。";
+            BOOL jailbreakdDispositionRecorded = [trace containsString:@"phase complete: temporary jailbreakd stopped before userspace reboot"] ||
+                                                  [trace containsString:@"phase deferred: temporary jailbreakd termination to launchd userspace teardown"];
+            if (!jailbreakdDispositionRecorded) {
+                return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但没有记录临时 jailbreakd 的重启处理策略。";
             }
             if (![trace containsString:@"RB2_USERREBOOT forwarding decision"]) {
                 return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但没有记录消息转发判定；中断发生在 RootHide XPC Hook 返回系统处理之前。";
@@ -274,6 +292,16 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             BOOL transitionCallObserved = [trace containsString:@"[launchd] post-RB2_USERREBOOT spawn observation"] ||
                                           [trace containsString:@"[launchd] post-RB2_USERREBOOT execve observation"];
             if (!transitionCallObserved) {
+                if ([trace containsString:@"[launchd] kern.willuserspacereboot entered"] &&
+                    ![trace containsString:@"[launchd] kern.willuserspacereboot returned"]) {
+                    return @"诊断结论：launchd 已调用 kern.willuserspacereboot，但该 sysctl 尚未返回；中断点已缩小到 userspace teardown 的入口。";
+                }
+                if ([trace containsString:@"[launchd] kern.willuserspacereboot returned"]) {
+                    return @"诊断结论：launchd 已正式进入 userspace teardown，但停在 self-spawn/self-exec 之前；问题在某个服务或子进程的退出阶段。";
+                }
+                if (stockLaunchctlObserved) {
+                    return @"诊断结论：苹果签名的 launchctl 已把 RB2_USERREBOOT 交给 launchd，但 launchd 连 kern.willuserspacereboot 阶段都没有进入；剩余问题位于注入后的 launchd 消息处理状态。";
+                }
                 return @"诊断结论：jbctl 平台授权已验证、旧版 /Developer 提前卸载已跳过、临时 jailbreakd 已停止，RB2_USERREBOOT 也已转交；但 launchd 仍未开始 self-spawn/self-exec，剩余故障位于 iOS 18 的 launchd 内部授权或 teardown。";
             }
             return @"诊断结论：launchd 已收到 RB2_USERREBOOT，并调用了进程替换 API，但目标没有匹配当前 launchd；请查看 post-RB2_USERREBOOT 与 candidate 行。";
