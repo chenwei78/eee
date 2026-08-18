@@ -145,6 +145,11 @@ static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *
 	// This XPC handler only runs after the constructor returned and launchd's
 	// normal threads have resumed; it is therefore the safe point to start it.
     roothide_trace("[launchd] jailbreakd lookup from pid=%d; initialized=%d", audit_token_to_pid(*callerToken), jailbreakdIsInitialized());
+	if (jailbreakdIsStoppingForUserspaceReboot()) {
+		roothide_trace("[launchd] jailbreakd lookup declined during userspace-reboot teardown");
+		return -4;
+	}
+
 	if (!jailbreakdIsInitialized()) {
         roothide_trace("[launchd] starting deferred jailbreakd");
         int initResult = initJailbreakd(true);
@@ -256,6 +261,28 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 	if (execHookResult != KERN_SUCCESS) {
 		roothide_trace("[launchd] FAILURE: refusing userspace reboot because deferred execve hook installation returned %d", execHookResult);
 		return -3;
+	}
+
+	// The live-injection jailbreakd is an extra PID 1 child that does not exist
+	// in the working rootless flow. Stop and reap it before iOS 18 begins
+	// userspace teardown, removing that extra process from the transition.
+	if (__builtin_available(iOS 18.0, *)) {
+		pid_t jailbreakdPid = -1;
+		int jailbreakdStatus = -1;
+		roothide_trace("[launchd] phase: stopping temporary jailbreakd before userspace reboot");
+		int stopResult = jailbreakdStopForUserspaceReboot(&jailbreakdPid, &jailbreakdStatus);
+		bool statusValid = jailbreakdStatus >= 0;
+		bool exited = statusValid && WIFEXITED(jailbreakdStatus);
+		bool signaled = statusValid && WIFSIGNALED(jailbreakdStatus);
+		roothide_trace("[launchd] temporary jailbreakd stop returned %d; pid=%d status_valid=%d status=%d exited=%d exit_code=%d signaled=%d signal=%d",
+		               stopResult, jailbreakdPid, statusValid, jailbreakdStatus,
+		               exited, exited ? WEXITSTATUS(jailbreakdStatus) : -1,
+		               signaled, signaled ? WTERMSIG(jailbreakdStatus) : 0);
+		if (stopResult != 0) {
+			roothide_trace("[launchd] FAILURE: refusing userspace reboot because temporary jailbreakd teardown failed");
+			return -4;
+		}
+		roothide_trace("[launchd] phase complete: temporary jailbreakd stopped before userspace reboot");
 	}
 
 	// Primitive stashing deliberately remains in the final self-spawn/self-exec

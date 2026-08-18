@@ -65,7 +65,8 @@ int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_objec
 
 	int r = xpc_receive_mach_msg_orig(msg, a2, a3, a4, xOut);
 	if (!wasProcessed && r == 0 && xOut && *xOut) {
-		if (is_userspace_reboot_message(*xOut)) {
+		bool userspaceRebootMessage = is_userspace_reboot_message(*xOut);
+		if (userspaceRebootMessage) {
 			audit_token_t callerToken = {0};
 			xpc_dictionary_get_audit_token(*xOut, &callerToken);
 			roothide_trace("[launchd] observed RB2_USERREBOOT XPC; caller_pid=%d caller_euid=%d",
@@ -74,7 +75,12 @@ int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_objec
 		}
 
 		roothide_handle_xpc_msg(*xOut);
-		if (jbserver_received_xpc_message(&gGlobalServer, *xOut) == 0) {
+		int jbserverResult = jbserver_received_xpc_message(&gGlobalServer, *xOut);
+		if (userspaceRebootMessage) {
+			roothide_trace("[launchd] RB2_USERREBOOT forwarding decision; xpc_result=%d jbserver_result=%d consumed=%d",
+			               r, jbserverResult, jbserverResult == 0);
+		}
+		if (jbserverResult == 0) {
 			// Returning non null here makes launchd disregard this message
 			// For jailbreak messages we have the logic to handle them
 			xpc_release(*xOut);

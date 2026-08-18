@@ -1,6 +1,7 @@
 #include <spawn.h>
 #include <unistd.h>
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -39,6 +40,7 @@ int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 static bool __firstLoad = false;
 static bool __jailbreakd_initialized = false;
 static volatile bool __jailbreakd_ready = false;
+static volatile bool __jailbreakd_stopping_for_userspace_reboot = false;
 mach_port_t gJailbreakdPort = MACH_PORT_NULL;
 static pid_t gJailbreakdPid = -1;
 static bool gJailbreakdExitObserved = false;
@@ -75,9 +77,17 @@ int registerServerPort()
 	JBLogDebug("jailbreakd server port: %x", gJailbreakdPort);
 
 #ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-	mach_port_t self_host = mach_host_self();
-	kr = host_set_special_port(self_host, HOST_LAUNCHCTL_PORT, gJailbreakdPort);
-	mach_port_deallocate(mach_task_self(), self_host);
+	// HOST_LAUNCHCTL_PORT is used as a RootHide fast path on older systems.
+	// Preserve the stock host-special-port state on iOS 18 and later because
+	// changing it is one remaining difference from the working rootless flow.
+	if (!__builtin_available(iOS 18.0, *)) {
+		mach_port_t self_host = mach_host_self();
+		kr = host_set_special_port(self_host, HOST_LAUNCHCTL_PORT, gJailbreakdPort);
+		mach_port_deallocate(mach_task_self(), self_host);
+	}
+	else {
+		roothide_spawn_trace("iOS 18 jailbreakd preserved HOST_LAUNCHCTL_PORT; clients will use launchd lookup");
+	}
 #endif
 	if (kr != KERN_SUCCESS) {
 		mach_port_destroy(mach_task_self(), gJailbreakdPort);
@@ -268,6 +278,8 @@ int initJailbreakd(bool firstLoad)
 {
 	assert(getpid() == 1);
 
+	if (__jailbreakd_stopping_for_userspace_reboot) return EBUSY;
+
 	assert(__jailbreakd_initialized == false);
 
 	__firstLoad = firstLoad;
@@ -287,6 +299,11 @@ int initJailbreakd(bool firstLoad)
 bool jailbreakdIsInitialized(void)
 {
 	return __jailbreakd_initialized;
+}
+
+bool jailbreakdIsStoppingForUserspaceReboot(void)
+{
+	return __jailbreakd_stopping_for_userspace_reboot;
 }
 
 bool jailbreakdIsReady(void)
@@ -327,9 +344,110 @@ bool jailbreakdConsumeExitStatus(int *statusOut)
 	return true;
 }
 
+int jailbreakdStopForUserspaceReboot(pid_t *pidOut, int *statusOut)
+{
+	assert(getpid() == 1);
+
+	// Block lookup-triggered respawns before terminating the current daemon.
+	// The flag remains set after success; a replacement launchd starts with
+	// fresh globals after the userspace reboot.
+	__jailbreakd_stopping_for_userspace_reboot = true;
+
+	pid_t pid = gJailbreakdPid;
+	if (pidOut) *pidOut = pid;
+	if (statusOut) *statusOut = -1;
+	roothide_spawn_trace("userspace-reboot jailbreakd teardown begin; recorded_pid=%d", pid);
+
+	if (pid > 0) {
+		int status = 0;
+		pid_t waitResult;
+		do {
+			waitResult = waitpid(pid, &status, WNOHANG);
+		} while (waitResult < 0 && errno == EINTR);
+
+		if (waitResult == 0) {
+			char processPath[PATH_MAX] = {0};
+			pid_t processParent = proc_get_ppid(pid);
+			char *resolvedPath = proc_get_path(pid, processPath);
+			roothide_spawn_trace("userspace-reboot jailbreakd identity; pid=%d ppid=%d path_resolved=%d path=%s",
+			                     pid, processParent, resolvedPath != NULL, resolvedPath ?: "(unavailable)");
+			if (processParent != 1 ||
+				!resolvedPath ||
+				!roothide_string_has_suffix(processPath, "/basebin/jailbreakd")) {
+				__jailbreakd_stopping_for_userspace_reboot = false;
+				return EINVAL;
+			}
+
+			errno = 0;
+			int killResult = kill(pid, SIGKILL);
+			int killError = errno;
+			roothide_spawn_trace("userspace-reboot jailbreakd SIGKILL; pid=%d result=%d errno=%d",
+			                     pid, killResult, killError);
+			if (killResult != 0 && killError != ESRCH) {
+				__jailbreakd_stopping_for_userspace_reboot = false;
+				return killError;
+			}
+
+			// Never block PID 1 indefinitely if the child cannot be reaped.
+			for (int attempt = 0; attempt < 200; attempt++) {
+				do {
+					waitResult = waitpid(pid, &status, WNOHANG);
+				} while (waitResult < 0 && errno == EINTR);
+				if (waitResult != 0) break;
+				usleep(10000);
+			}
+
+			if (waitResult == 0) {
+				roothide_spawn_trace("userspace-reboot jailbreakd reap timed out; pid=%d", pid);
+				return ETIMEDOUT;
+			}
+		}
+
+		if (waitResult == pid) {
+			if (statusOut) *statusOut = status;
+			roothide_spawn_trace("userspace-reboot jailbreakd reaped; pid=%d raw_status=%d", pid, status);
+		}
+		else if (waitResult < 0) {
+			int waitError = errno;
+			if (waitError != ECHILD) {
+				__jailbreakd_stopping_for_userspace_reboot = false;
+				return waitError;
+			}
+
+			// ECHILD is only harmless when the stale PID no longer exists.
+			errno = 0;
+			if (kill(pid, 0) == 0 || errno != ESRCH) {
+				__jailbreakd_stopping_for_userspace_reboot = false;
+				return ECHILD;
+			}
+		}
+	}
+
+	// The receive right moves to jailbreakd at check-in. Release any send right
+	// or dead name that remains in launchd after the child has exited.
+	if (MACH_PORT_VALID(gJailbreakdPort)) {
+		mach_port_t oldPort = gJailbreakdPort;
+		kern_return_t portCleanupResult = mach_port_destroy(mach_task_self(), oldPort);
+		roothide_spawn_trace("userspace-reboot jailbreakd port cleanup; port=%x result=%d",
+		                     oldPort, portCleanupResult);
+		gJailbreakdPort = MACH_PORT_NULL;
+	}
+
+	unsetenv("JAILBREAKD_PID");
+	gJailbreakdPid = -1;
+	gJailbreakdExitObserved = false;
+	gJailbreakdExitConsumed = false;
+	gJailbreakdExitStatus = 0;
+	__jailbreakd_ready = false;
+	__jailbreakd_initialized = false;
+	return 0;
+}
+
 void jailbreakdSetReady(void)
 {
-	__jailbreakd_ready = true;
+	if (!__jailbreakd_stopping_for_userspace_reboot) {
+		__jailbreakd_ready = true;
+	}
 }
 
 mach_port_t reactiveJailbreakdPort()
@@ -401,6 +519,8 @@ mach_port_t jailbreakdServerPort()
 
 mach_port_t jailbreakdClientPort()
 {
+	if (__jailbreakd_stopping_for_userspace_reboot) return MACH_PORT_NULL;
+
 	mach_port_t port = MACH_PORT_NULL;
 
 	if(getpid() == 1)
@@ -417,7 +537,12 @@ mach_port_t jailbreakdClientPort()
 	{
 
 #ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-		port = jailbreakdClientPortFastGet();
+		// Keep the older fast path where HOST_LAUNCHCTL_PORT is owned by
+		// RootHide. On iOS 18 it is deliberately left untouched, so resolve the
+		// current daemon through launchd instead.
+		if (!__builtin_available(iOS 18.0, *)) {
+			port = jailbreakdClientPortFastGet();
+		}
 		if(!MACH_PORT_VALID(port))
 		{
 #endif

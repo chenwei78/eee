@@ -23,7 +23,9 @@ void jailbreakdSetBootstrapMessageHandler(jailbreakd_bootstrap_message_handler_t
 int initJailbreakd(bool firstLoad);
 bool jailbreakdIsInitialized(void);
 bool jailbreakdIsReady(void);
+bool jailbreakdIsStoppingForUserspaceReboot(void);
 bool jailbreakdConsumeExitStatus(int *statusOut);
+int jailbreakdStopForUserspaceReboot(pid_t *pidOut, int *statusOut);
 void jailbreakdSetReady(void);
 
 void setJailbreakdProcess(pid_t pid);

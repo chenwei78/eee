@@ -248,10 +248,20 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
         }
         if (rebootXPCObserved && !replacementMatched) {
+            if (![trace containsString:@"phase complete: temporary jailbreakd stopped before userspace reboot"]) {
+                return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但临时 jailbreakd 没有在重启前完成退出；它仍可能阻塞 launchd teardown。";
+            }
+            if (![trace containsString:@"RB2_USERREBOOT forwarding decision"]) {
+                return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但没有记录消息转发判定；中断发生在 RootHide XPC Hook 返回系统处理之前。";
+            }
+            if ([trace containsString:@"RB2_USERREBOOT forwarding decision"] &&
+                [trace containsString:@"consumed=1"]) {
+                return @"诊断结论：RootHide 的 XPC/JBServer Hook 消费了 RB2_USERREBOOT；请查看 forwarding decision 行。";
+            }
             BOOL transitionCallObserved = [trace containsString:@"[launchd] post-RB2_USERREBOOT spawn observation"] ||
                                           [trace containsString:@"[launchd] post-RB2_USERREBOOT execve observation"];
             if (!transitionCallObserved) {
-                return @"诊断结论：launchd 已收到 RB2_USERREBOOT，但随后没有调用 __posix_spawn 或 __execve；中断发生在 launchd 开始替换自身之前。";
+                return @"诊断结论：临时 jailbreakd 已停止且 RB2_USERREBOOT 已转交 launchd，但随后没有调用 __posix_spawn 或 __execve；中断发生在 launchd 内部 teardown。";
             }
             return @"诊断结论：launchd 已收到 RB2_USERREBOOT，并调用了进程替换 API，但目标没有匹配当前 launchd；请查看 post-RB2_USERREBOOT 与 candidate 行。";
         }
