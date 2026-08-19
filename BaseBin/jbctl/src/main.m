@@ -124,9 +124,27 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	                   watchdogPid, watchdogRebootPath);
 	// opainject must start without systemhook or jailbreakd child patching.  It
 	// manipulates thread state itself, and pre-main injection crashes the helper
-	// before it can create its arm64e PAC child.
+	// before it can create its arm64e PAC child.  _SafeMode is consumed by the
+	// systemhook spawn wrapper, so it suppresses injection without leaking into
+	// opainject itself.
+	char traceEnvironment[PATH_MAX + 32] = {0};
+	char *cleanEnvironment[] = {
+		(char *)"_SafeMode=1",
+		(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		NULL,
+		NULL,
+	};
+	const char *tracePath = getenv("ROOTHIDE_JBCTL_TRACE_PATH");
+	if (tracePath && tracePath[0]) {
+		int traceLength = snprintf(traceEnvironment, sizeof(traceEnvironment),
+		                           "ROOTHIDE_JBCTL_TRACE_PATH=%s", tracePath);
+		if (traceLength > 0 && (size_t)traceLength < sizeof(traceEnvironment)) {
+			cleanEnvironment[2] = traceEnvironment;
+		}
+	}
 	exec_set_bootstrap_trust_only(true);
-	int injectionResult = exec_cmd(opainjectPath, watchdogPidString, watchdogRebootPath, NULL);
+	int injectionResult = exec_cmd_env(cleanEnvironment, opainjectPath,
+	                                   watchdogPidString, watchdogRebootPath, NULL);
 	exec_set_bootstrap_trust_only(false);
 	RootHideJbctlTrace("watchdog reboot bridge injection returned %d", injectionResult);
 	if (injectionResult != 0) {
