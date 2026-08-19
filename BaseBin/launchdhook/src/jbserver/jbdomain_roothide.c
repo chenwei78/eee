@@ -346,12 +346,28 @@ static int roothide_prepare_userspace_reboot(audit_token_t *callerToken)
 		}
 	}
 
-	// Let launchd terminate its own children as part of userspace teardown.
-	// Killing and reaping the temporary jailbreakd synchronously from this XPC
-	// handler mutates PID 1's child/job state immediately before the reboot
-	// request, unlike the working stock Dopamine sequence.
+	// The first-live-injection jailbreakd is a direct PID 1 child, but it is not
+	// represented by a normal launchd job.  The iOS 18 userspace teardown only
+	// drains managed jobs, so leaving this helper alive can prevent launchd from
+	// reaching its final POSIX_SPAWN_SETEXEC transition.  Stop it after Bootstrap
+	// child patching has finished and before the watchdogd reboot request.
 	if (__builtin_available(iOS 18.0, *)) {
-		roothide_trace("[launchd] phase deferred: temporary jailbreakd termination to launchd userspace teardown");
+		pid_t jailbreakdPid = -1;
+		int jailbreakdStatus = -1;
+		roothide_trace("[launchd] phase: stopping temporary jailbreakd before userspace reboot");
+		int stopResult = jailbreakdStopForUserspaceReboot(&jailbreakdPid, &jailbreakdStatus);
+		bool statusValid = jailbreakdStatus >= 0;
+		bool exited = statusValid && WIFEXITED(jailbreakdStatus);
+		bool signaled = statusValid && WIFSIGNALED(jailbreakdStatus);
+		roothide_trace("[launchd] temporary jailbreakd stop returned %d; pid=%d status_valid=%d status=%d exited=%d exit_code=%d signaled=%d signal=%d",
+		               stopResult, jailbreakdPid, statusValid, jailbreakdStatus,
+		               exited, exited ? WEXITSTATUS(jailbreakdStatus) : -1,
+		               signaled, signaled ? WTERMSIG(jailbreakdStatus) : 0);
+		if (stopResult != 0) {
+			roothide_trace("[launchd] FAILURE: refusing userspace reboot because temporary jailbreakd teardown failed");
+			return -4;
+		}
+		roothide_trace("[launchd] phase complete: temporary jailbreakd stopped before userspace reboot");
 	}
 
 	// Primitive stashing deliberately remains in the final self-spawn/self-exec

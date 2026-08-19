@@ -88,7 +88,19 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (userspaceReboot) {
 		roothide_trace("[launchd] kern.willuserspacereboot returned; sysctl_result=%d", r);
-		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
+		if (__builtin_available(iOS 18.0, *)) {
+			// On first live injection the framebuffer context does not exist yet.
+			// Initializing IOMobileFramebuffer and terminating backboardd from this
+			// teardown callback can block launchd before it drains its jobs.  The
+			// logo is cosmetic; preserve the established path on older systems.
+			roothide_trace("[launchd] phase skipped: boot logo drawing during iOS 18 userspace teardown");
+		}
+		else {
+			roothide_trace("[launchd] phase: drawing userspace-reboot boot logo");
+			draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
+			roothide_trace("[launchd] phase complete: drawing userspace-reboot boot logo");
+		}
+		roothide_trace("[launchd] phase complete: kern.willuserspacereboot hook");
 	}
 	return r;
 }
