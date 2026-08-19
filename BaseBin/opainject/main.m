@@ -1,6 +1,7 @@
 #import <stdio.h>
 #import <stdlib.h>
 #import <unistd.h>
+#import <fcntl.h>
 #import <dlfcn.h>
 #import <mach-o/getsect.h>
 #import <mach-o/dyld.h>
@@ -9,6 +10,7 @@
 #import <mach-o/nlist.h>
 #import <mach-o/reloc.h>
 #import <sys/utsname.h>
+#import <sys/stat.h>
 #import <string.h>
 #import <limits.h>
 #import <spawn.h>
@@ -17,6 +19,28 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import "shellcode_inject.h"
 #import "rop_inject.h"
+
+static void configureDiagnosticOutput(void)
+{
+	const char *tracePath = getenv("ROOTHIDE_JBCTL_TRACE_PATH");
+	if (!tracePath || !tracePath[0]) return;
+
+	int trace = open(tracePath, O_WRONLY | O_APPEND);
+	if (trace < 0) return;
+
+	struct stat traceStatus = {0};
+	if (fstat(trace, &traceStatus) != 0 || traceStatus.st_size >= 240 * 1024) {
+		close(trace);
+		return;
+	}
+
+	dprintf(trace, "[opainject] diagnostic output connected; pid=%d\n", getpid());
+	if (dup2(trace, STDOUT_FILENO) < 0 || dup2(trace, STDERR_FILENO) < 0) {
+		close(trace);
+		return;
+	}
+	if (trace > STDERR_FILENO) close(trace);
+}
 
 
 char* resolvePath(char* pathToResolve)
@@ -94,6 +118,7 @@ void spawnPacChild(int argc, char *argv[])
 int main(int argc, char *argv[], char *envp[]) {
 	@autoreleasepool
 	{
+		configureDiagnosticOutput();
 		setlinebuf(stdout);
 		setlinebuf(stderr);
 		if (argc < 3 || argc > 4)

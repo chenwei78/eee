@@ -9,7 +9,7 @@
 
 all: basebin.tar
 
-subprojects: ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks dopamine
+subprojects: ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook watchdogreboot rootlesshooks dopamine
 
 # GitHub source archives created on Windows flatten ChOma's include/choma ->
 # ../src symlink into a plain text file. Recreate its public-header directory
@@ -97,6 +97,10 @@ watchdoghook: .build .include libjailbreak
 	$(MAKE) -C watchdoghook
 	@cp watchdoghook/watchdoghook.dylib .build
 
+watchdogreboot: .build .include libjailbreak
+	$(MAKE) -C watchdogreboot
+	@cp watchdogreboot/watchdogreboot.dylib .build
+
 rootlesshooks: .build .include libjailbreak
 	$(MAKE) -C rootlesshooks
 	@cp rootlesshooks/.theos/obj/rootlesshooks.dylib .build
@@ -150,6 +154,7 @@ clean:
 	@$(MAKE) -C jbctl $@
 	@$(MAKE) -C idownloadd $@
 	@$(MAKE) -C watchdoghook $@
+	@$(MAKE) -C watchdogreboot $@
 	@$(MAKE) -C rootlesshooks $@
 	@$(MAKE) -C dyldhook $@
 	@$(MAKE) -C dopamine $@
@@ -159,4 +164,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include prepare_choma_headers ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar
+.PHONY: clean .build .include prepare_choma_headers ChOma XPF MachOMerger opainject libjailbreak roothidehooks jailbreakd bootstrapper systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook watchdogreboot rootlesshooks basebin.tc dyldhook basebin.tar
