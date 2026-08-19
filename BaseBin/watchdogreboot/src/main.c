@@ -73,7 +73,7 @@ static void RootHideWatchdogTrace(const char *format, ...)
 	va_start(args, format);
 	vsnprintf(message, sizeof(message), format, args);
 	va_end(args);
-	dprintf(trace, "[watchdogd] %s\n", message);
+	dprintf(trace, "[reboot-host] %s\n", message);
 	fsync(trace);
 	close(trace);
 }
@@ -151,8 +151,9 @@ __attribute__((constructor)) static void initializer(void)
 	    pingNotifyResult == NOTIFY_STATUS_OK &&
 	    resultNotifyResult == NOTIFY_STATUS_OK &&
 	    readyResult == NOTIFY_STATUS_OK) {
-		RootHideWatchdogTrace("userspace-reboot notification channel ready; notify_result=%u ping_result=%u result_result=%u ready_result=%u",
-		                      rebootNotifyResult, pingNotifyResult, resultNotifyResult, readyResult);
+		RootHideWatchdogTrace("userspace-reboot notification channel ready; pid=%d ppid=%d notify_result=%u ping_result=%u result_result=%u ready_result=%u",
+		                      getpid(), getppid(), rebootNotifyResult, pingNotifyResult,
+		                      resultNotifyResult, readyResult);
 	}
 	else {
 		RootHideWatchdogTrace("FAILURE: userspace-reboot notification setup returned notify=%u ping=%u result=%u ready=%u",

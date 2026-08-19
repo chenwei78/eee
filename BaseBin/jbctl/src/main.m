@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <libproc.h>
 #include <limits.h>
+#include <mach/mach.h>
+#include <mach/task_info.h>
 #include <notify.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -22,6 +24,8 @@
 #include <sys/proc_info.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <xpc/xpc.h>
+#include <xpc_private.h>
 
 int reboot3(uint64_t flags, ...);
 #define RB2_USERREBOOT (0x2000000000000000llu)
@@ -51,10 +55,42 @@ static void RootHideJbctlTrace(const char *format, ...)
 	close(trace);
 }
 
-static pid_t RootHideFindWatchdogd(void)
+static int RootHideBooleanEntitlementForPid(pid_t pid, const char *entitlement)
+{
+	if (pid <= 1 || !entitlement) return -1;
+
+	mach_port_t task = MACH_PORT_NULL;
+	kern_return_t taskResult = task_for_pid(mach_task_self(), pid, &task);
+	if (taskResult != KERN_SUCCESS || !MACH_PORT_VALID(task)) {
+		RootHideJbctlTrace("entitlement probe task_for_pid failed; pid=%d result=%d task=%x",
+		                   pid, taskResult, task);
+		return -1;
+	}
+
+	audit_token_t auditToken = {0};
+	mach_msg_type_number_t tokenCount = TASK_AUDIT_TOKEN_COUNT;
+	kern_return_t tokenResult = task_info(task, TASK_AUDIT_TOKEN,
+	                                      (task_info_t)&auditToken, &tokenCount);
+	mach_port_deallocate(mach_task_self(), task);
+	if (tokenResult != KERN_SUCCESS || tokenCount < TASK_AUDIT_TOKEN_COUNT) {
+		RootHideJbctlTrace("entitlement probe TASK_AUDIT_TOKEN failed; pid=%d result=%d count=%u expected=%u",
+		                   pid, tokenResult, tokenCount, (unsigned int)TASK_AUDIT_TOKEN_COUNT);
+		return -1;
+	}
+
+	xpc_object_t value = xpc_copy_entitlement_for_token(entitlement, &auditToken);
+	if (!value) {
+		RootHideJbctlTrace("entitlement probe returned no value; pid=%d entitlement=%s", pid, entitlement);
+		return 0;
+	}
+	int result = xpc_get_type(value) == XPC_TYPE_BOOL && xpc_bool_get_value(value) ? 1 : 0;
+	return result;
+}
+
+static pid_t RootHideFindMaintenanceRebootHost(void)
 {
 	int requiredBytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-	RootHideJbctlTrace("watchdogd process enumeration sizing returned %d", requiredBytes);
+	RootHideJbctlTrace("mmaintenanced process enumeration sizing returned %d", requiredBytes);
 	if (requiredBytes <= 0 || requiredBytes > INT_MAX - (int)(64 * sizeof(pid_t))) return -1;
 
 	int bufferSize = requiredBytes + (int)(64 * sizeof(pid_t));
@@ -67,7 +103,7 @@ static pid_t RootHideFindWatchdogd(void)
 		return -1;
 	}
 
-	pid_t watchdogPid = -1;
+	pid_t maintenancePid = -1;
 	int pidCount = returnedBytes / (int)sizeof(pid_t);
 	for (int i = 0; i < pidCount; i++) {
 		pid_t pid = pids[i];
@@ -75,22 +111,38 @@ static pid_t RootHideFindWatchdogd(void)
 
 		char processPath[PATH_MAX] = {0};
 		if (proc_pidpath(pid, processPath, sizeof(processPath)) <= 0) continue;
-		if (strcmp(processPath, "/usr/libexec/watchdogd") == 0) {
-			watchdogPid = pid;
-			break;
+		if (strcmp(processPath, "/usr/libexec/mmaintenanced") != 0) continue;
+
+		struct proc_bsdinfo bsdInfo = {0};
+		int bsdInfoResult = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+		                                     &bsdInfo, sizeof(bsdInfo));
+		uint32_t csFlags = 0;
+		int csResult = csops(pid, CS_OPS_STATUS, &csFlags, sizeof(csFlags));
+		int rebootEntitlement = RootHideBooleanEntitlementForPid(
+			pid, "com.apple.private.xpc.launchd.userspace-reboot");
+		RootHideJbctlTrace("mmaintenanced candidate; pid=%d ppid=%d bsdinfo=%d csops=%d csflags=0x%08x platform=%d reboot_entitlement=%d",
+		                   pid, bsdInfo.pbi_ppid, bsdInfoResult, csResult, csFlags,
+		                   csResult == 0 && (csFlags & CS_PLATFORM_BINARY) != 0,
+		                   rebootEntitlement);
+		if (bsdInfoResult == sizeof(bsdInfo) && bsdInfo.pbi_ppid == 1 &&
+		    csResult == 0 && (csFlags & CS_PLATFORM_BINARY) != 0 &&
+		    rebootEntitlement == 1) {
+			maintenancePid = pid;
 		}
+		break;
 	}
 	free(pids);
 
-	RootHideJbctlTrace("watchdogd process lookup returned pid=%d listed_bytes=%d", watchdogPid, returnedBytes);
-	return watchdogPid;
+	RootHideJbctlTrace("mmaintenanced reboot host lookup returned pid=%d listed_bytes=%d",
+	                   maintenancePid, returnedBytes);
+	return maintenancePid;
 }
 
-static int RootHideRequestWatchdogUserspaceReboot(void)
+static int RootHideRequestMaintenanceUserspaceReboot(void)
 {
-	pid_t watchdogPid = RootHideFindWatchdogd();
-	if (watchdogPid <= 1) {
-		RootHideJbctlTrace("FAILURE: could not locate /usr/libexec/watchdogd");
+	pid_t rebootHostPid = RootHideFindMaintenanceRebootHost();
+	if (rebootHostPid <= 1) {
+		RootHideJbctlTrace("FAILURE: no verified /usr/libexec/mmaintenanced reboot host is running");
 		return 72;
 	}
 
@@ -101,27 +153,27 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 		return 73;
 	}
 	if (!watchdogRebootPath || access(watchdogRebootPath, R_OK) != 0) {
-		RootHideJbctlTrace("FAILURE: watchdog reboot bridge is unavailable at %s", watchdogRebootPath ?: "(null)");
+		RootHideJbctlTrace("FAILURE: userspace-reboot bridge is unavailable at %s", watchdogRebootPath ?: "(null)");
 		return 74;
 	}
 
 	int readyToken = -1;
 	uint32_t readyRegisterResult = notify_register_check(
 		ROOTHIDE_WATCHDOG_REBOOT_READY_NOTIFICATION, &readyToken);
-	RootHideJbctlTrace("watchdogd readiness registration returned %u token=%d",
+	RootHideJbctlTrace("reboot-host readiness registration returned %u token=%d",
 	                   readyRegisterResult, readyToken);
 	if (readyRegisterResult != NOTIFY_STATUS_OK) {
-		RootHideJbctlTrace("FAILURE: watchdogd readiness registration returned %u", readyRegisterResult);
+		RootHideJbctlTrace("FAILURE: reboot-host readiness registration returned %u", readyRegisterResult);
 		return 75;
 	}
 
 	int changed = 0;
 	(void)notify_check(readyToken, &changed); // Discard notifications from an earlier attempt.
 
-	char watchdogPidString[32] = {0};
-	snprintf(watchdogPidString, sizeof(watchdogPidString), "%d", watchdogPid);
-	RootHideJbctlTrace("injecting watchdog reboot bridge into watchdogd; pid=%d path=%s",
-	                   watchdogPid, watchdogRebootPath);
+	char rebootHostPidString[32] = {0};
+	snprintf(rebootHostPidString, sizeof(rebootHostPidString), "%d", rebootHostPid);
+	RootHideJbctlTrace("injecting userspace-reboot bridge into mmaintenanced; pid=%d path=%s",
+	                   rebootHostPid, watchdogRebootPath);
 	// opainject must start without systemhook or jailbreakd child patching.  It
 	// manipulates thread state itself, and pre-main injection crashes the helper
 	// before it can create its arm64e PAC child.  _SafeMode is consumed by the
@@ -144,20 +196,20 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	}
 	exec_set_bootstrap_trust_only(true);
 	int injectionResult = exec_cmd_env(cleanEnvironment, opainjectPath,
-	                                   watchdogPidString, watchdogRebootPath, NULL);
+	                                   rebootHostPidString, watchdogRebootPath, NULL);
 	exec_set_bootstrap_trust_only(false);
-	RootHideJbctlTrace("watchdog reboot bridge injection returned %d", injectionResult);
+	RootHideJbctlTrace("mmaintenanced reboot bridge injection returned %d", injectionResult);
 	if (injectionResult != 0) {
 		notify_cancel(readyToken);
-		RootHideJbctlTrace("FAILURE: watchdog reboot bridge injection returned %d", injectionResult);
+		RootHideJbctlTrace("FAILURE: mmaintenanced reboot bridge injection returned %d", injectionResult);
 		return 76;
 	}
 
 	uint32_t pingResult = notify_post(ROOTHIDE_WATCHDOG_REBOOT_PING_NOTIFICATION);
-	RootHideJbctlTrace("watchdogd readiness probe post returned %u", pingResult);
+	RootHideJbctlTrace("reboot-host readiness probe post returned %u", pingResult);
 	if (pingResult != NOTIFY_STATUS_OK) {
 		notify_cancel(readyToken);
-		RootHideJbctlTrace("FAILURE: watchdogd readiness probe post returned %u", pingResult);
+		RootHideJbctlTrace("FAILURE: reboot-host readiness probe post returned %u", pingResult);
 		return 77;
 	}
 
@@ -174,19 +226,19 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	}
 	notify_cancel(readyToken);
 	if (readyCheckResult != NOTIFY_STATUS_OK || readyAttempt == 0) {
-		RootHideJbctlTrace("FAILURE: watchdogd notification channel did not become ready; check_result=%u",
+		RootHideJbctlTrace("FAILURE: reboot-host notification channel did not become ready; check_result=%u",
 		                   readyCheckResult);
 		return 78;
 	}
-	RootHideJbctlTrace("watchdogd notification channel ready after %d attempt(s)", readyAttempt);
+	RootHideJbctlTrace("reboot-host notification channel ready after %d attempt(s)", readyAttempt);
 
 	int receivedToken = -1;
 	uint32_t receivedRegisterResult = notify_register_check(
 		ROOTHIDE_WATCHDOG_REBOOT_RECEIVED_NOTIFICATION, &receivedToken);
-	RootHideJbctlTrace("watchdogd request acknowledgement registration returned %u token=%d",
+	RootHideJbctlTrace("reboot-host request acknowledgement registration returned %u token=%d",
 	                   receivedRegisterResult, receivedToken);
 	if (receivedRegisterResult != NOTIFY_STATUS_OK) {
-		RootHideJbctlTrace("FAILURE: watchdogd request acknowledgement registration returned %u",
+		RootHideJbctlTrace("FAILURE: reboot-host request acknowledgement registration returned %u",
 		                   receivedRegisterResult);
 		return 79;
 	}
@@ -195,32 +247,32 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	int resultToken = -1;
 	uint32_t resultRegisterResult = notify_register_check(
 		ROOTHIDE_WATCHDOG_REBOOT_RESULT_NOTIFICATION, &resultToken);
-	RootHideJbctlTrace("watchdogd reboot result registration returned %u token=%d",
+	RootHideJbctlTrace("reboot-host reboot result registration returned %u token=%d",
 	                   resultRegisterResult, resultToken);
 	if (resultRegisterResult != NOTIFY_STATUS_OK) {
 		notify_cancel(receivedToken);
-		RootHideJbctlTrace("FAILURE: watchdogd reboot result registration returned %u",
+		RootHideJbctlTrace("FAILURE: reboot-host reboot result registration returned %u",
 		                   resultRegisterResult);
 		return 80;
 	}
 	changed = 0;
 	(void)notify_check(resultToken, &changed);
 	uint32_t resetStateResult = notify_set_state(resultToken, UINT64_MAX);
-	RootHideJbctlTrace("watchdogd reboot result state reset returned %u", resetStateResult);
+	RootHideJbctlTrace("reboot-host reboot result state reset returned %u", resetStateResult);
 	if (resetStateResult != NOTIFY_STATUS_OK) {
 		notify_cancel(receivedToken);
 		notify_cancel(resultToken);
-		RootHideJbctlTrace("FAILURE: watchdogd reboot result state reset returned %u", resetStateResult);
+		RootHideJbctlTrace("FAILURE: reboot-host reboot result state reset returned %u", resetStateResult);
 		return 81;
 	}
 
-	RootHideJbctlTrace("posting userspace-reboot request to watchdogd pid=%d", watchdogPid);
+	RootHideJbctlTrace("posting userspace-reboot request to mmaintenanced pid=%d", rebootHostPid);
 	uint32_t requestResult = notify_post(ROOTHIDE_WATCHDOG_REBOOT_NOTIFICATION);
-	RootHideJbctlTrace("watchdogd userspace-reboot notification post returned %u", requestResult);
+	RootHideJbctlTrace("reboot-host userspace-reboot notification post returned %u", requestResult);
 	if (requestResult != NOTIFY_STATUS_OK) {
 		notify_cancel(receivedToken);
 		notify_cancel(resultToken);
-		RootHideJbctlTrace("FAILURE: watchdogd userspace-reboot notification post returned %u", requestResult);
+		RootHideJbctlTrace("FAILURE: reboot-host userspace-reboot notification post returned %u", requestResult);
 		return 82;
 	}
 
@@ -238,11 +290,11 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	notify_cancel(receivedToken);
 	if (receivedCheckResult != NOTIFY_STATUS_OK || receivedAttempt == 0) {
 		notify_cancel(resultToken);
-		RootHideJbctlTrace("FAILURE: watchdogd did not acknowledge the userspace-reboot request; check_result=%u",
+		RootHideJbctlTrace("FAILURE: reboot-host did not acknowledge the userspace-reboot request; check_result=%u",
 		                   receivedCheckResult);
 		return 83;
 	}
-	RootHideJbctlTrace("watchdogd acknowledged userspace-reboot request after %d attempt(s)", receivedAttempt);
+	RootHideJbctlTrace("reboot-host acknowledged userspace-reboot request after %d attempt(s)", receivedAttempt);
 
 	int resultAttempt = 0;
 	uint32_t resultCheckResult = NOTIFY_STATUS_OK;
@@ -270,15 +322,15 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	    resultAttempt != 0) {
 		int rebootResult = (int)(int32_t)(resultState >> 32);
 		int rebootErrno = (int)(uint32_t)resultState;
-		RootHideJbctlTrace("watchdogd reboot3 result returned %d errno=%d; get_state=%u attempt=%d",
+		RootHideJbctlTrace("reboot-host reboot3 result returned %d errno=%d; get_state=%u attempt=%d",
 		                   rebootResult, rebootErrno, getStateResult, resultAttempt);
 		if (rebootResult != 0) {
-			RootHideJbctlTrace("FAILURE: watchdogd reboot3 returned %d errno=%d", rebootResult, rebootErrno);
+			RootHideJbctlTrace("FAILURE: reboot-host reboot3 returned %d errno=%d", rebootResult, rebootErrno);
 			return 85;
 		}
 	}
 	else {
-		RootHideJbctlTrace("FAILURE: watchdogd reboot3 result was not observed; check_result=%u get_state=%u",
+		RootHideJbctlTrace("FAILURE: reboot-host reboot3 result was not observed; check_result=%u get_state=%u",
 		                   resultCheckResult, getStateResult);
 		return 84;
 	}
@@ -317,7 +369,7 @@ static int PerformUserspaceReboot(void)
 	}
 
 	if (@available(iOS 18.0, *)) {
-		return RootHideRequestWatchdogUserspaceReboot();
+		return RootHideRequestMaintenanceUserspaceReboot();
 	}
 
 	usleep(10000);

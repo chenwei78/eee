@@ -242,21 +242,32 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
         }
 
         BOOL rebootXPCObserved = [trace containsString:@"[launchd] observed RB2_USERREBOOT XPC"];
-        BOOL watchdogInjectionStarted = [trace containsString:@"[jbctl] injecting watchdog reboot bridge into watchdogd"];
-        BOOL watchdogInjectionReturned = [trace containsString:@"[jbctl] watchdog reboot bridge injection returned"];
-        BOOL watchdogChannelReady = [trace containsString:@"[jbctl] watchdogd notification channel ready"];
-        BOOL watchdogRequestPosted = [trace containsString:@"[jbctl] watchdogd userspace-reboot notification post returned 0"];
-        BOOL watchdogRequestAcknowledged = [trace containsString:@"[jbctl] watchdogd acknowledged userspace-reboot request"];
-        BOOL watchdogRequestReceived = [trace containsString:@"[watchdogd] userspace-reboot request received"];
-        BOOL watchdogRebootCalled = [trace containsString:@"[watchdogd] calling reboot3 with RB2_USERREBOOT"] ||
+        BOOL watchdogInjectionStarted = [trace containsString:@"[jbctl] injecting userspace-reboot bridge into mmaintenanced"] ||
+                                        [trace containsString:@"[jbctl] injecting watchdog reboot bridge into watchdogd"];
+        BOOL watchdogInjectionReturned = [trace containsString:@"[jbctl] mmaintenanced reboot bridge injection returned"] ||
+                                         [trace containsString:@"[jbctl] watchdog reboot bridge injection returned"];
+        BOOL watchdogChannelReady = [trace containsString:@"[jbctl] reboot-host notification channel ready"] ||
+                                    [trace containsString:@"[jbctl] watchdogd notification channel ready"];
+        BOOL watchdogRequestPosted = [trace containsString:@"[jbctl] reboot-host userspace-reboot notification post returned 0"] ||
+                                     [trace containsString:@"[jbctl] watchdogd userspace-reboot notification post returned 0"];
+        BOOL watchdogRequestAcknowledged = [trace containsString:@"[jbctl] reboot-host acknowledged userspace-reboot request"] ||
+                                           [trace containsString:@"[jbctl] watchdogd acknowledged userspace-reboot request"];
+        BOOL watchdogRequestReceived = [trace containsString:@"[reboot-host] userspace-reboot request received"] ||
+                                       [trace containsString:@"[watchdogd] userspace-reboot request received"];
+        BOOL watchdogRebootCalled = [trace containsString:@"[reboot-host] calling reboot3 with RB2_USERREBOOT"] ||
+                                    [trace containsString:@"[watchdogd] calling reboot3 with RB2_USERREBOOT"] ||
+                                    [trace containsString:@"[jbctl] reboot-host reboot3 result returned"] ||
                                     [trace containsString:@"[jbctl] watchdogd reboot3 result returned"];
         __block BOOL watchdogRebootXPCObserved = NO;
         [trace enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+            BOOL verifiedMaintenanceHost = [line containsString:@" path=/usr/libexec/mmaintenanced "] &&
+                                           [line containsString:@" reboot_entitlement=1 "];
+            BOOL verifiedLegacyWatchdogHost = [line containsString:@" path=/usr/libexec/watchdogd "] &&
+                                              [line containsString:@" watchdog_entitlement=1 "];
             if ([line containsString:@"[launchd] observed RB2_USERREBOOT XPC"] &&
-                [line containsString:@" path=/usr/libexec/watchdogd "] &&
                 [line containsString:@" csops=0"] &&
                 [line containsString:@" platform=1 "] &&
-                [line containsString:@" watchdog_entitlement=1 "]) {
+                (verifiedMaintenanceHost || verifiedLegacyWatchdogHost)) {
                 watchdogRebootXPCObserved = YES;
                 *stop = YES;
             }
@@ -267,27 +278,27 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
             return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
         }
         if (watchdogInjectionStarted && !watchdogInjectionReturned) {
-            return @"诊断结论：已开始向 watchdogd 注入重启桥，但 opainject 尚未返回；中断位于 task port、远程 dlopen 或构造函数执行阶段。";
+            return @"诊断结论：已开始向 Apple 重启宿主注入桥，但 opainject 尚未返回；中断位于 task port、远程 dlopen 或构造函数执行阶段。";
         }
         if (watchdogInjectionReturned && !watchdogChannelReady) {
-            return @"诊断结论：opainject 已返回，但 watchdogd 的通知监听器尚未通过握手；请查看 injection、readiness probe 和 FAILURE 行。";
+            return @"诊断结论：opainject 已返回，但重启宿主的通知监听器尚未通过握手；请查看 injection、readiness probe 和 FAILURE 行。";
         }
         if (watchdogChannelReady && !watchdogRequestPosted) {
-            return @"诊断结论：watchdogd 通知通道已就绪，但 jbctl 尚未成功投递 userspace-reboot 请求。";
+            return @"诊断结论：重启宿主通知通道已就绪，但 jbctl 尚未成功投递 userspace-reboot 请求。";
         }
         if (watchdogRequestPosted &&
             !watchdogRequestAcknowledged && !watchdogRequestReceived && !rebootXPCObserved) {
-            return @"诊断结论：jbctl 已投递重启通知，但 watchdogd 尚未确认收到；中断位于 Darwin notification 派发。";
+            return @"诊断结论：jbctl 已投递重启通知，但重启宿主尚未确认收到；中断位于 Darwin notification 派发。";
         }
         if ((watchdogRequestAcknowledged || watchdogRequestReceived) &&
             !watchdogRebootCalled && !rebootXPCObserved) {
-            return @"诊断结论：watchdogd 已收到请求，但尚未进入 reboot3 调用。";
+            return @"诊断结论：重启宿主已收到请求，但尚未进入 reboot3 调用。";
         }
         if ((watchdogRequestAcknowledged || watchdogRebootCalled) && !rebootXPCObserved) {
-            return @"诊断结论：watchdogd 已接收请求并进入重启路径，但 launchd 尚未观察到 RB2_USERREBOOT XPC。";
+            return @"诊断结论：重启宿主已接收请求并进入重启路径，但 launchd 尚未观察到 RB2_USERREBOOT XPC。";
         }
         if (rebootXPCObserved && !watchdogRebootXPCObserved) {
-            return @"诊断结论：launchd 收到了 RB2_USERREBOOT，但调用者未验证为平台进程 /usr/libexec/watchdogd，或缺少 watchdog 权限；请查看 observed RB2_USERREBOOT 行。";
+            return @"诊断结论：launchd 收到了 RB2_USERREBOOT，但调用者不是已验证的平台重启宿主，或缺少对应权限；请查看 observed RB2_USERREBOOT 行。";
         }
         if (rebootXPCObserved && !replacementMatched) {
             __block BOOL callerAuthorizationVerified = NO;
@@ -326,7 +337,7 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
                     return @"诊断结论：launchd 已正式进入 userspace teardown，但停在 self-spawn/self-exec 之前；问题在某个服务或子进程的退出阶段。";
                 }
                 if (watchdogRebootXPCObserved) {
-                    return @"诊断结论：Apple watchdogd 发出的 RB2_USERREBOOT 已由 launchd 接收且权限验证通过，但尚未进入 kern.willuserspacereboot；剩余故障位于 iOS 18 launchd 的内部 teardown。";
+                    return @"诊断结论：Apple 重启宿主发出的 RB2_USERREBOOT 已由 launchd 接收且权限验证通过，但尚未进入 kern.willuserspacereboot；剩余故障位于 iOS 18 launchd 的内部 teardown。";
                 }
                 return @"诊断结论：jbctl preflight 已通过、临时 jailbreakd 由系统 teardown 接管、RB2_USERREBOOT 也已转交；但 launchd 仍未开始 self-spawn/self-exec。";
             }
