@@ -282,6 +282,15 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
 	}
 
+	// opainject is a thread-state bootstrap helper.  Injecting systemhook into
+	// either its outer process or the arm64e PAC child makes it crash before
+	// main.  The caller recursively trusts the outer binary, and the PAC child
+	// executes that same already-trusted image.
+	if (path && string_has_suffix(path, "/basebin/opainject")) {
+		roothide_trace("[launchd] spawn hook observed opainject helper; bypassing normal child patching");
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	}
+
 	// If we're drawing a boot logo, free up it's resources before backboardd starts
 	if (gFreeBootLogoBeforeBackboardd) {
 		if (!strcmp(path, "/usr/libexec/xpcproxy")) {

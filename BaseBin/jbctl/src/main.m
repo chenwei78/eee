@@ -122,7 +122,12 @@ static int RootHideRequestWatchdogUserspaceReboot(void)
 	snprintf(watchdogPidString, sizeof(watchdogPidString), "%d", watchdogPid);
 	RootHideJbctlTrace("injecting watchdog reboot bridge into watchdogd; pid=%d path=%s",
 	                   watchdogPid, watchdogRebootPath);
+	// opainject must start without systemhook or jailbreakd child patching.  It
+	// manipulates thread state itself, and pre-main injection crashes the helper
+	// before it can create its arm64e PAC child.
+	exec_set_bootstrap_trust_only(true);
 	int injectionResult = exec_cmd(opainjectPath, watchdogPidString, watchdogRebootPath, NULL);
+	exec_set_bootstrap_trust_only(false);
 	RootHideJbctlTrace("watchdog reboot bridge injection returned %d", injectionResult);
 	if (injectionResult != 0) {
 		notify_cancel(readyToken);
