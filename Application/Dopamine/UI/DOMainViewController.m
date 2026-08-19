@@ -242,6 +242,8 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
         }
 
         BOOL rebootXPCObserved = [trace containsString:@"[launchd] observed RB2_USERREBOOT XPC"];
+        BOOL maintenanceFallbackStarted = [trace containsString:@"mmaintenanced is not running as a verified launchd child; starting native fallback"];
+        BOOL maintenanceFallbackFailed = [trace containsString:@"FAILURE: no verified /usr/libexec/mmaintenanced reboot host is available"];
         BOOL watchdogInjectionStarted = [trace containsString:@"[jbctl] injecting userspace-reboot bridge into mmaintenanced"] ||
                                         [trace containsString:@"[jbctl] injecting watchdog reboot bridge into watchdogd"];
         BOOL watchdogInjectionReturned = [trace containsString:@"[jbctl] mmaintenanced reboot bridge injection returned"] ||
@@ -276,6 +278,9 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
                                   [trace containsString:@"[launchd] userspace-reboot self-exec matched"];
         if ([trace containsString:@"[jbctl] reboot3 returned 0"] && !rebootXPCObserved) {
             return @"诊断结论：reboot3 返回成功，但 launchd 的 Hook 没观察到 RB2_USERREBOOT XPC；问题在系统重启消息路径或消息格式。";
+        }
+        if (maintenanceFallbackStarted && maintenanceFallbackFailed && !watchdogInjectionStarted) {
+            return @"诊断结论：系统未运行 mmaintenanced，直接启动原生重启宿主也未通过验证；请查看 native mmaintenanced direct spawn、candidate 和 FAILURE 行。";
         }
         if (watchdogInjectionStarted && !watchdogInjectionReturned) {
             return @"诊断结论：已开始向 Apple 重启宿主注入桥，但 opainject 尚未返回；中断位于 task port、远程 dlopen 或构造函数执行阶段。";

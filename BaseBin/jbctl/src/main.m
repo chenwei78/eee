@@ -16,6 +16,7 @@
 #include <mach/mach.h>
 #include <mach/task_info.h>
 #include <notify.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #include <string.h>
 #include <sys/proc_info.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <xpc/xpc.h>
 #include <xpc_private.h>
@@ -55,15 +57,17 @@ static void RootHideJbctlTrace(const char *format, ...)
 	close(trace);
 }
 
-static int RootHideBooleanEntitlementForPid(pid_t pid, const char *entitlement)
+static int RootHideBooleanEntitlementForPid(pid_t pid, const char *entitlement, bool traceFailure)
 {
 	if (pid <= 1 || !entitlement) return -1;
 
 	mach_port_t task = MACH_PORT_NULL;
 	kern_return_t taskResult = task_for_pid(mach_task_self(), pid, &task);
 	if (taskResult != KERN_SUCCESS || !MACH_PORT_VALID(task)) {
-		RootHideJbctlTrace("entitlement probe task_for_pid failed; pid=%d result=%d task=%x",
-		                   pid, taskResult, task);
+		if (traceFailure) {
+			RootHideJbctlTrace("entitlement probe task_for_pid failed; pid=%d result=%d task=%x",
+			                   pid, taskResult, task);
+		}
 		return -1;
 	}
 
@@ -73,18 +77,50 @@ static int RootHideBooleanEntitlementForPid(pid_t pid, const char *entitlement)
 	                                      (task_info_t)&auditToken, &tokenCount);
 	mach_port_deallocate(mach_task_self(), task);
 	if (tokenResult != KERN_SUCCESS || tokenCount < TASK_AUDIT_TOKEN_COUNT) {
-		RootHideJbctlTrace("entitlement probe TASK_AUDIT_TOKEN failed; pid=%d result=%d count=%u expected=%u",
-		                   pid, tokenResult, tokenCount, (unsigned int)TASK_AUDIT_TOKEN_COUNT);
+		if (traceFailure) {
+			RootHideJbctlTrace("entitlement probe TASK_AUDIT_TOKEN failed; pid=%d result=%d count=%u expected=%u",
+			                   pid, tokenResult, tokenCount, (unsigned int)TASK_AUDIT_TOKEN_COUNT);
+		}
 		return -1;
 	}
 
 	xpc_object_t value = xpc_copy_entitlement_for_token(entitlement, &auditToken);
 	if (!value) {
-		RootHideJbctlTrace("entitlement probe returned no value; pid=%d entitlement=%s", pid, entitlement);
+		if (traceFailure) {
+			RootHideJbctlTrace("entitlement probe returned no value; pid=%d entitlement=%s", pid, entitlement);
+		}
 		return 0;
 	}
 	int result = xpc_get_type(value) == XPC_TYPE_BOOL && xpc_bool_get_value(value) ? 1 : 0;
 	return result;
+}
+
+static bool RootHideVerifyMaintenanceRebootHost(pid_t pid, bool allowDirectChild, bool traceCandidate)
+{
+	if (pid <= 1) return false;
+
+	char processPath[PATH_MAX] = {0};
+	if (proc_pidpath(pid, processPath, sizeof(processPath)) <= 0 ||
+	    strcmp(processPath, "/usr/libexec/mmaintenanced") != 0) {
+		return false;
+	}
+
+	struct proc_bsdinfo bsdInfo = {0};
+	int bsdInfoResult = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+	                                     &bsdInfo, sizeof(bsdInfo));
+	uint32_t csFlags = 0;
+	int csResult = csops(pid, CS_OPS_STATUS, &csFlags, sizeof(csFlags));
+	int rebootEntitlement = RootHideBooleanEntitlementForPid(
+		pid, "com.apple.private.xpc.launchd.userspace-reboot", traceCandidate);
+	bool platform = csResult == 0 && (csFlags & CS_PLATFORM_BINARY) != 0;
+	bool expectedParent = bsdInfoResult == sizeof(bsdInfo) &&
+		(bsdInfo.pbi_ppid == 1 || (allowDirectChild && bsdInfo.pbi_ppid == getpid()));
+	if (traceCandidate) {
+		RootHideJbctlTrace("mmaintenanced candidate; pid=%d ppid=%d bsdinfo=%d csops=%d csflags=0x%08x platform=%d reboot_entitlement=%d direct=%d",
+		                   pid, bsdInfo.pbi_ppid, bsdInfoResult, csResult, csFlags,
+		                   platform, rebootEntitlement, allowDirectChild);
+	}
+	return expectedParent && platform && rebootEntitlement == 1;
 }
 
 static pid_t RootHideFindMaintenanceRebootHost(void)
@@ -109,27 +145,10 @@ static pid_t RootHideFindMaintenanceRebootHost(void)
 		pid_t pid = pids[i];
 		if (pid <= 1) continue;
 
-		char processPath[PATH_MAX] = {0};
-		if (proc_pidpath(pid, processPath, sizeof(processPath)) <= 0) continue;
-		if (strcmp(processPath, "/usr/libexec/mmaintenanced") != 0) continue;
-
-		struct proc_bsdinfo bsdInfo = {0};
-		int bsdInfoResult = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
-		                                     &bsdInfo, sizeof(bsdInfo));
-		uint32_t csFlags = 0;
-		int csResult = csops(pid, CS_OPS_STATUS, &csFlags, sizeof(csFlags));
-		int rebootEntitlement = RootHideBooleanEntitlementForPid(
-			pid, "com.apple.private.xpc.launchd.userspace-reboot");
-		RootHideJbctlTrace("mmaintenanced candidate; pid=%d ppid=%d bsdinfo=%d csops=%d csflags=0x%08x platform=%d reboot_entitlement=%d",
-		                   pid, bsdInfo.pbi_ppid, bsdInfoResult, csResult, csFlags,
-		                   csResult == 0 && (csFlags & CS_PLATFORM_BINARY) != 0,
-		                   rebootEntitlement);
-		if (bsdInfoResult == sizeof(bsdInfo) && bsdInfo.pbi_ppid == 1 &&
-		    csResult == 0 && (csFlags & CS_PLATFORM_BINARY) != 0 &&
-		    rebootEntitlement == 1) {
+		if (RootHideVerifyMaintenanceRebootHost(pid, false, true)) {
 			maintenancePid = pid;
+			break;
 		}
-		break;
 	}
 	free(pids);
 
@@ -138,12 +157,85 @@ static pid_t RootHideFindMaintenanceRebootHost(void)
 	return maintenancePid;
 }
 
+static pid_t RootHideStartMaintenanceRebootHost(void)
+{
+	const char *maintenancePath = "/usr/libexec/mmaintenanced";
+	if (access(maintenancePath, X_OK) != 0) {
+		RootHideJbctlTrace("FAILURE: native mmaintenanced is unavailable at %s", maintenancePath);
+		return -1;
+	}
+
+	char *environment[] = {
+		(char *)"_SafeMode=1",
+		(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		NULL,
+	};
+	char *arguments[] = {(char *)maintenancePath, NULL};
+	posix_spawnattr_t attributes = NULL;
+	if (posix_spawnattr_init(&attributes) != 0) {
+		RootHideJbctlTrace("FAILURE: could not initialize native mmaintenanced spawn attributes");
+		return -1;
+	}
+	short flags = 0;
+	posix_spawnattr_getflags(&attributes, &flags);
+	posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_START_SUSPENDED);
+
+	// This is a stock system daemon.  Keep it out of RootHide child patching;
+	// the bridge is installed explicitly below after the process is verified.
+	exec_set_patch(false);
+	exec_set_bootstrap_trust_only(false);
+	pid_t spawnedPid = -1;
+	int spawnResult = exec_cmd_roothide_spawn(&spawnedPid, maintenancePath, NULL,
+	                                           &attributes, arguments, environment);
+	exec_set_patch(true);
+	posix_spawnattr_destroy(&attributes);
+	RootHideJbctlTrace("native mmaintenanced direct spawn returned %d pid=%d", spawnResult, spawnedPid);
+	if (spawnResult != 0 || spawnedPid <= 1) return -1;
+
+	if (kill(spawnedPid, SIGCONT) != 0) {
+		RootHideJbctlTrace("FAILURE: could not resume native mmaintenanced pid=%d errno=%d",
+		                   spawnedPid, errno);
+		(void)kill(spawnedPid, SIGKILL);
+		(void)waitpid(spawnedPid, NULL, 0);
+		return -1;
+	}
+	RootHideJbctlTrace("native mmaintenanced direct child resumed; pid=%d", spawnedPid);
+
+	for (int attempt = 1; attempt <= 40; attempt++) {
+		if (RootHideVerifyMaintenanceRebootHost(spawnedPid, true, false)) {
+			RootHideJbctlTrace("native mmaintenanced direct child verified after %d attempt(s); pid=%d",
+			                   attempt, spawnedPid);
+			return spawnedPid;
+		}
+
+		int status = 0;
+		pid_t waitResult = waitpid(spawnedPid, &status, WNOHANG);
+		if (waitResult == spawnedPid) {
+			RootHideJbctlTrace("FAILURE: native mmaintenanced direct child exited; pid=%d status=%d",
+			                   spawnedPid, status);
+			return -1;
+		}
+		usleep(25000);
+	}
+
+	(void)RootHideVerifyMaintenanceRebootHost(spawnedPid, true, true);
+	RootHideJbctlTrace("FAILURE: native mmaintenanced direct child did not pass verification; pid=%d",
+	                   spawnedPid);
+	(void)kill(spawnedPid, SIGKILL);
+	(void)waitpid(spawnedPid, NULL, 0);
+	return -1;
+}
+
 static int RootHideRequestMaintenanceUserspaceReboot(void)
 {
 	pid_t rebootHostPid = RootHideFindMaintenanceRebootHost();
 	if (rebootHostPid <= 1) {
-		RootHideJbctlTrace("FAILURE: no verified /usr/libexec/mmaintenanced reboot host is running");
-		return 72;
+		RootHideJbctlTrace("mmaintenanced is not running as a verified launchd child; starting native fallback");
+		rebootHostPid = RootHideStartMaintenanceRebootHost();
+		if (rebootHostPid <= 1) {
+			RootHideJbctlTrace("FAILURE: no verified /usr/libexec/mmaintenanced reboot host is available");
+			return 72;
+		}
 	}
 
 	const char *opainjectPath = JBROOT_PATH("/basebin/opainject");
