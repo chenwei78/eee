@@ -378,6 +378,20 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
     if ([trace containsString:@"phase: preparing RootHide bootstrap"] && ![trace containsString:@"phase complete: preparing RootHide bootstrap"]) {
         return @"诊断结论：卡在 RootHide Bootstrap 文件准备阶段，尚未进入 BaseBin TrustCache 或 launchd 注入。";
     }
+    if ([trace containsString:@"phase: generating RootHide dyld environment"] &&
+        ![trace containsString:@"phase complete: generating RootHide dyld environment"]) {
+        NSRange mergerRange = [trace rangeOfString:@"/basebin/MachOMerger" options:NSBackwardsSearch];
+        NSString *mergerTrace = mergerRange.location == NSNotFound ? @"" : [trace substringFromIndex:mergerRange.location];
+        BOOL mergerResumed = [mergerTrace containsString:@"resumed unpatched child"];
+        BOOL waitCompleted = [mergerTrace containsString:@"child wait completed"];
+        if (mergerResumed && !waitCompleted) {
+            return @"诊断结论：MachOMerger 已启动并恢复运行，但父进程没有观察到它退出；当前流程尚未注入 launchd，故障已隔离到 MachOMerger 或输入 dyld。";
+        }
+        if (waitCompleted) {
+            return @"诊断结论：MachOMerger 已退出，但 RootHide dyld 生成流程没有完成；请查看最后一条 child wait completed 的退出码或信号。";
+        }
+        return @"诊断结论：停在 RootHide dyld 生成阶段；MachOMerger 尚未完成 spawn/resume。";
+    }
     if ([trace containsString:@"FAILURE: opainject returned"]) {
         return @"诊断结论：opainject 已返回错误。错误码见上一行，launchdhook 没有完成启动。";
     }
@@ -447,20 +461,6 @@ static NSString *const RootHideLastPresentedTraceKey = @"RootHideLastPresentedTr
     }
     if (![trace containsString:@"phase complete: launchd primitive-handoff acknowledgement received"]) {
         return @"诊断结论：launchd 已继续执行，但 Dopamine 没有收到原语交接确认。请以最后一条日志为准。";
-    }
-    if ([trace containsString:@"phase: generating RootHide dyld environment"] &&
-        ![trace containsString:@"phase complete: generating RootHide dyld environment"]) {
-        NSRange mergerRange = [trace rangeOfString:@"/basebin/MachOMerger" options:NSBackwardsSearch];
-        NSString *mergerTrace = mergerRange.location == NSNotFound ? @"" : [trace substringFromIndex:mergerRange.location];
-        BOOL mergerResumed = [mergerTrace containsString:@"resumed unpatched child"];
-        BOOL waitCompleted = [mergerTrace containsString:@"child wait completed"];
-        if (mergerResumed && !waitCompleted) {
-            return @"诊断结论：MachOMerger 已成功生成并恢复运行，但父进程没有观察到它退出；若设备随即重启，优先检查此时的 launchd 崩溃，而不是 MachOMerger 返回码。";
-        }
-        if (waitCompleted) {
-            return @"诊断结论：MachOMerger 已退出，但 RootHide dyld 生成流程没有完成；请查看最后一条 child wait completed 的退出码或信号。";
-        }
-        return @"诊断结论：停在 RootHide dyld 生成阶段；MachOMerger 尚未完成 spawn/resume。";
     }
     return @"诊断结论：启动流程已通过已记录阶段；请分享完整日志以确认用户空间重启后的后续状态。";
 }

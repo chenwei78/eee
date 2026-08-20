@@ -857,13 +857,10 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
         return;
     }
 
-    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing Environment") debug:NO];
-    *errOut = [self injectLaunchdHook];
-    if (*errOut) {
-        [self cleanUpPostExploitation];
-        return;
-    }
-    
+    // Build and trust the merged dyld before modifying PID 1.  MachOMerger
+    // does not need launchd child patching (BaseBin is already trust-cached),
+    // and keeping this Swift helper outside the live launchdhook window avoids
+    // turning a merger stall into an ambiguous launchd/userspace restart.
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing RootHide") debug:NO];
     RootHideAppendTrace(@"phase: generating RootHide dyld environment");
     int rootHideResult = basebin_generate(false);
@@ -884,6 +881,13 @@ static BOOL RootHideWaitForDeferredJailbreakd(void)
         return;
     }
     RootHideAppendTrace(@"phase complete: uploading RootHide dyld trust cache");
+
+    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing Environment") debug:NO];
+    *errOut = [self injectLaunchdHook];
+    if (*errOut) {
+        [self cleanUpPostExploitation];
+        return;
+    }
 
     // launchdhook is now live; enable child patching and use the stock path
     // while the first userspace reboot is being prepared.
