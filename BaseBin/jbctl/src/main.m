@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <launch.h>
 #include <libproc.h>
 #include <limits.h>
 #include <mach/mach.h>
@@ -123,7 +124,7 @@ static bool RootHideVerifyMaintenanceRebootHost(pid_t pid, bool allowDirectChild
 	return expectedParent && platform && rebootEntitlement == 1;
 }
 
-static pid_t RootHideFindMaintenanceRebootHost(bool traceLookup)
+static pid_t RootHideFindMaintenanceRebootHost(bool traceLookup, pid_t excludedPid)
 {
 	int requiredBytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
 	if (traceLookup) {
@@ -146,6 +147,7 @@ static pid_t RootHideFindMaintenanceRebootHost(bool traceLookup)
 	for (int i = 0; i < pidCount; i++) {
 		pid_t pid = pids[i];
 		if (pid <= 1) continue;
+		if (pid == excludedPid) continue;
 
 		if (RootHideVerifyMaintenanceRebootHost(pid, false, traceLookup)) {
 			maintenancePid = pid;
@@ -161,38 +163,70 @@ static pid_t RootHideFindMaintenanceRebootHost(bool traceLookup)
 	return maintenancePid;
 }
 
-static pid_t RootHideSubmitMaintenanceRebootHost(void)
+static int RootHideLaunchMessageResult(launch_data_t request)
 {
-	const char *launchctlPath = JBROOT_PATH("/usr/bin/launchctl");
-	const char *jobLabel = "com.opa334.Dopamine.roothide.reboot-host";
-	if (!launchctlPath || access(launchctlPath, X_OK) != 0) {
-		RootHideJbctlTrace("FAILURE: launchctl submit helper is unavailable at %s",
-		                   launchctlPath ?: "(null)");
-		return -1;
+	if (!request) return EINVAL;
+	launch_data_t response = launch_msg(request);
+	launch_data_free(request);
+	if (!response) return errno ? errno : EIO;
+	int result = 0;
+	launch_data_type_t responseType = launch_data_get_type(response);
+	if (responseType == LAUNCH_DATA_ERRNO) {
+		result = launch_data_get_errno(response);
+	}
+	else if (responseType != LAUNCH_DATA_DICTIONARY) {
+		result = EPROTO;
+	}
+	launch_data_free(response);
+	return result;
+}
+
+static int RootHideSubmitMaintenanceJob(const char *jobLabel)
+{
+	launch_data_t request = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+	launch_data_t job = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+	launch_data_t arguments = launch_data_alloc(LAUNCH_DATA_ARRAY);
+	if (!request || !job || !arguments) {
+		if (request) launch_data_free(request);
+		if (job) launch_data_free(job);
+		if (arguments) launch_data_free(arguments);
+		return ENOMEM;
 	}
 
-	char *environment[] = {
-		(char *)"_SafeMode=1",
-		(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-		NULL,
-	};
+	launch_data_array_set_index(arguments, launch_data_new_string("/usr/libexec/mmaintenanced"), 0);
+	launch_data_dict_insert(job, launch_data_new_string(jobLabel), LAUNCH_JOBKEY_LABEL);
+	launch_data_dict_insert(job, arguments, LAUNCH_JOBKEY_PROGRAMARGUMENTS);
+	launch_data_dict_insert(job, launch_data_new_string("mobile"), LAUNCH_JOBKEY_USERNAME);
+	launch_data_dict_insert(job, launch_data_new_string("mobile"), LAUNCH_JOBKEY_GROUPNAME);
+	launch_data_dict_insert(job, launch_data_new_bool(true), LAUNCH_JOBKEY_RUNATLOAD);
+	launch_data_dict_insert(job, launch_data_new_string(LAUNCH_KEY_PROCESSTYPE_BACKGROUND), LAUNCH_JOBKEY_PROCESSTYPE);
+	launch_data_dict_insert(request, job, LAUNCH_KEY_SUBMITJOB);
+	return RootHideLaunchMessageResult(request);
+}
 
+static int RootHideRemoveMaintenanceJob(const char *jobLabel)
+{
+	launch_data_t request = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+	if (!request) return ENOMEM;
+	launch_data_dict_insert(request, launch_data_new_string(jobLabel), LAUNCH_KEY_REMOVEJOB);
+	return RootHideLaunchMessageResult(request);
+}
+
+static pid_t RootHideSubmitMaintenanceRebootHost(pid_t excludedPid)
+{
+	const char *jobLabel = "com.opa334.Dopamine.roothide.reboot-host";
 	// Submit a transient launchd job instead of directly spawning a system
-	// daemon.  iOS kills a direct /usr/libexec/mmaintenanced child; launchd must
+	// daemon. iOS kills a direct /usr/libexec/mmaintenanced child; launchd must
 	// create it so it receives the normal bootstrap and remains ppid=1.
-	exec_set_patch(false);
-	exec_set_bootstrap_trust_only(false);
-	int removeResult = exec_cmd_env(environment, launchctlPath, "remove", jobLabel, NULL);
+	int removeResult = RootHideRemoveMaintenanceJob(jobLabel);
 	RootHideJbctlTrace("isolated reboot-host stale job removal returned %d", removeResult);
-	int submitResult = exec_cmd_env(environment, launchctlPath, "submit", "-l", jobLabel,
-	                                "--", "/usr/libexec/mmaintenanced", NULL);
-	exec_set_patch(true);
-	RootHideJbctlTrace("isolated reboot-host launchctl submit returned %d label=%s",
+	int submitResult = RootHideSubmitMaintenanceJob(jobLabel);
+	RootHideJbctlTrace("isolated reboot-host launch_msg submit returned %d label=%s",
 	                   submitResult, jobLabel);
 	if (submitResult != 0) return -1;
 
 	for (int attempt = 1; attempt <= 40; attempt++) {
-		pid_t rebootHostPid = RootHideFindMaintenanceRebootHost(false);
+		pid_t rebootHostPid = RootHideFindMaintenanceRebootHost(false, excludedPid);
 		if (rebootHostPid > 1) {
 			RootHideVerifyMaintenanceRebootHost(rebootHostPid, false, true);
 			RootHideJbctlTrace("isolated reboot-host launchd child verified after %d attempt(s); pid=%d",
@@ -203,7 +237,7 @@ static pid_t RootHideSubmitMaintenanceRebootHost(void)
 	}
 
 	RootHideJbctlTrace("FAILURE: isolated reboot-host launchd job did not produce a verified mmaintenanced child");
-	(void)exec_cmd_env(environment, launchctlPath, "remove", jobLabel, NULL);
+	(void)RootHideRemoveMaintenanceJob(jobLabel);
 	return -1;
 }
 
@@ -213,10 +247,10 @@ static int RootHideRequestMaintenanceUserspaceReboot(void)
 	// jobs during RB2_USERREBOOT, so a bridge blocked inside that instance's
 	// reboot3 call can prevent launchd from reaching its self-spawn transition.
 	// Keep the lookup as evidence, but always use an isolated native child.
-	pid_t managedHostPid = RootHideFindMaintenanceRebootHost(true);
+	pid_t managedHostPid = RootHideFindMaintenanceRebootHost(true, -1);
 	RootHideJbctlTrace("using isolated launchd-submitted mmaintenanced reboot host; managed_pid=%d",
 	                   managedHostPid);
-	pid_t rebootHostPid = RootHideSubmitMaintenanceRebootHost();
+	pid_t rebootHostPid = RootHideSubmitMaintenanceRebootHost(managedHostPid);
 	if (rebootHostPid <= 1) {
 		RootHideJbctlTrace("FAILURE: no isolated launchd-submitted /usr/libexec/mmaintenanced reboot host is available");
 		return 72;

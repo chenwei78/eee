@@ -291,6 +291,15 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
 	}
 
+	// The reboot bridge is injected explicitly after launchd has created this
+	// temporary native job.  Do not add systemhook here; pre-main injection into
+	// Apple's memory-maintenance daemon can make it exit before opainject gets a
+	// task port, and would leave the reboot host without its expected bootstrap.
+	if (path && !strcmp(path, "/usr/libexec/mmaintenanced")) {
+		roothide_trace("[launchd] spawn hook observed mmaintenanced reboot host; bypassing normal child patching");
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	}
+
 	// If we're drawing a boot logo, free up it's resources before backboardd starts
 	if (gFreeBootLogoBeforeBackboardd) {
 		if (!strcmp(path, "/usr/libexec/xpcproxy")) {
