@@ -179,6 +179,10 @@ static pid_t RootHideStartMaintenanceRebootHost(void)
 	short flags = 0;
 	posix_spawnattr_getflags(&attributes, &flags);
 	posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_START_SUSPENDED);
+	int uidResult = posix_spawnattr_setuid_np(&attributes, 501);
+	int gidResult = posix_spawnattr_setgid_np(&attributes, 501);
+	RootHideJbctlTrace("native mmaintenanced identity setup; uid_result=%d gid_result=%d uid=501 gid=501",
+	                   uidResult, gidResult);
 
 	// This is a stock system daemon.  Keep it out of RootHide child patching;
 	// the bridge is installed explicitly below after the process is verified.
@@ -228,14 +232,17 @@ static pid_t RootHideStartMaintenanceRebootHost(void)
 
 static int RootHideRequestMaintenanceUserspaceReboot(void)
 {
-	pid_t rebootHostPid = RootHideFindMaintenanceRebootHost();
+	// Never inject into the normal ppid=1 instance.  launchd drains managed
+	// jobs during RB2_USERREBOOT, so a bridge blocked inside that instance's
+	// reboot3 call can prevent launchd from reaching its self-spawn transition.
+	// Keep the lookup as evidence, but always use an isolated native child.
+	pid_t managedHostPid = RootHideFindMaintenanceRebootHost();
+	RootHideJbctlTrace("using isolated native mmaintenanced reboot host; managed_pid=%d",
+	                   managedHostPid);
+	pid_t rebootHostPid = RootHideStartMaintenanceRebootHost();
 	if (rebootHostPid <= 1) {
-		RootHideJbctlTrace("mmaintenanced is not running as a verified launchd child; starting native fallback");
-		rebootHostPid = RootHideStartMaintenanceRebootHost();
-		if (rebootHostPid <= 1) {
-			RootHideJbctlTrace("FAILURE: no verified /usr/libexec/mmaintenanced reboot host is available");
-			return 72;
-		}
+		RootHideJbctlTrace("FAILURE: no isolated /usr/libexec/mmaintenanced reboot host is available");
+		return 72;
 	}
 
 	const char *opainjectPath = JBROOT_PATH("/basebin/opainject");
