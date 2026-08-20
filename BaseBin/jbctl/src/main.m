@@ -123,10 +123,12 @@ static bool RootHideVerifyMaintenanceRebootHost(pid_t pid, bool allowDirectChild
 	return expectedParent && platform && rebootEntitlement == 1;
 }
 
-static pid_t RootHideFindMaintenanceRebootHost(void)
+static pid_t RootHideFindMaintenanceRebootHost(bool traceLookup)
 {
 	int requiredBytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-	RootHideJbctlTrace("mmaintenanced process enumeration sizing returned %d", requiredBytes);
+	if (traceLookup) {
+		RootHideJbctlTrace("mmaintenanced process enumeration sizing returned %d", requiredBytes);
+	}
 	if (requiredBytes <= 0 || requiredBytes > INT_MAX - (int)(64 * sizeof(pid_t))) return -1;
 
 	int bufferSize = requiredBytes + (int)(64 * sizeof(pid_t));
@@ -145,23 +147,27 @@ static pid_t RootHideFindMaintenanceRebootHost(void)
 		pid_t pid = pids[i];
 		if (pid <= 1) continue;
 
-		if (RootHideVerifyMaintenanceRebootHost(pid, false, true)) {
+		if (RootHideVerifyMaintenanceRebootHost(pid, false, traceLookup)) {
 			maintenancePid = pid;
 			break;
 		}
 	}
 	free(pids);
 
-	RootHideJbctlTrace("mmaintenanced reboot host lookup returned pid=%d listed_bytes=%d",
-	                   maintenancePid, returnedBytes);
+	if (traceLookup) {
+		RootHideJbctlTrace("mmaintenanced reboot host lookup returned pid=%d listed_bytes=%d",
+		                   maintenancePid, returnedBytes);
+	}
 	return maintenancePid;
 }
 
-static pid_t RootHideStartMaintenanceRebootHost(void)
+static pid_t RootHideSubmitMaintenanceRebootHost(void)
 {
-	const char *maintenancePath = "/usr/libexec/mmaintenanced";
-	if (access(maintenancePath, X_OK) != 0) {
-		RootHideJbctlTrace("FAILURE: native mmaintenanced is unavailable at %s", maintenancePath);
+	const char *launchctlPath = JBROOT_PATH("/usr/bin/launchctl");
+	const char *jobLabel = "com.opa334.Dopamine.roothide.reboot-host";
+	if (!launchctlPath || access(launchctlPath, X_OK) != 0) {
+		RootHideJbctlTrace("FAILURE: launchctl submit helper is unavailable at %s",
+		                   launchctlPath ?: "(null)");
 		return -1;
 	}
 
@@ -170,63 +176,34 @@ static pid_t RootHideStartMaintenanceRebootHost(void)
 		(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
 		NULL,
 	};
-	char *arguments[] = {(char *)maintenancePath, NULL};
-	posix_spawnattr_t attributes = NULL;
-	if (posix_spawnattr_init(&attributes) != 0) {
-		RootHideJbctlTrace("FAILURE: could not initialize native mmaintenanced spawn attributes");
-		return -1;
-	}
-	short flags = 0;
-	posix_spawnattr_getflags(&attributes, &flags);
-	posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_START_SUSPENDED);
-	int uidResult = posix_spawnattr_set_uid_np(&attributes, 501);
-	int gidResult = posix_spawnattr_set_gid_np(&attributes, 501);
-	RootHideJbctlTrace("native mmaintenanced identity setup; uid_result=%d gid_result=%d uid=501 gid=501",
-	                   uidResult, gidResult);
 
-	// This is a stock system daemon.  Keep it out of RootHide child patching;
-	// the bridge is installed explicitly below after the process is verified.
+	// Submit a transient launchd job instead of directly spawning a system
+	// daemon.  iOS kills a direct /usr/libexec/mmaintenanced child; launchd must
+	// create it so it receives the normal bootstrap and remains ppid=1.
 	exec_set_patch(false);
 	exec_set_bootstrap_trust_only(false);
-	pid_t spawnedPid = -1;
-	int spawnResult = exec_cmd_roothide_spawn(&spawnedPid, maintenancePath, NULL,
-	                                           &attributes, arguments, environment);
+	int removeResult = exec_cmd_env(environment, launchctlPath, "remove", jobLabel, NULL);
+	RootHideJbctlTrace("isolated reboot-host stale job removal returned %d", removeResult);
+	int submitResult = exec_cmd_env(environment, launchctlPath, "submit", "-l", jobLabel,
+	                                "--", "/usr/libexec/mmaintenanced", NULL);
 	exec_set_patch(true);
-	posix_spawnattr_destroy(&attributes);
-	RootHideJbctlTrace("native mmaintenanced direct spawn returned %d pid=%d", spawnResult, spawnedPid);
-	if (spawnResult != 0 || spawnedPid <= 1) return -1;
-
-	if (kill(spawnedPid, SIGCONT) != 0) {
-		RootHideJbctlTrace("FAILURE: could not resume native mmaintenanced pid=%d errno=%d",
-		                   spawnedPid, errno);
-		(void)kill(spawnedPid, SIGKILL);
-		(void)waitpid(spawnedPid, NULL, 0);
-		return -1;
-	}
-	RootHideJbctlTrace("native mmaintenanced direct child resumed; pid=%d", spawnedPid);
+	RootHideJbctlTrace("isolated reboot-host launchctl submit returned %d label=%s",
+	                   submitResult, jobLabel);
+	if (submitResult != 0) return -1;
 
 	for (int attempt = 1; attempt <= 40; attempt++) {
-		if (RootHideVerifyMaintenanceRebootHost(spawnedPid, true, false)) {
-			RootHideJbctlTrace("native mmaintenanced direct child verified after %d attempt(s); pid=%d",
-			                   attempt, spawnedPid);
-			return spawnedPid;
-		}
-
-		int status = 0;
-		pid_t waitResult = waitpid(spawnedPid, &status, WNOHANG);
-		if (waitResult == spawnedPid) {
-			RootHideJbctlTrace("FAILURE: native mmaintenanced direct child exited; pid=%d status=%d",
-			                   spawnedPid, status);
-			return -1;
+		pid_t rebootHostPid = RootHideFindMaintenanceRebootHost(false);
+		if (rebootHostPid > 1) {
+			RootHideVerifyMaintenanceRebootHost(rebootHostPid, false, true);
+			RootHideJbctlTrace("isolated reboot-host launchd child verified after %d attempt(s); pid=%d",
+			                   attempt, rebootHostPid);
+			return rebootHostPid;
 		}
 		usleep(25000);
 	}
 
-	(void)RootHideVerifyMaintenanceRebootHost(spawnedPid, true, true);
-	RootHideJbctlTrace("FAILURE: native mmaintenanced direct child did not pass verification; pid=%d",
-	                   spawnedPid);
-	(void)kill(spawnedPid, SIGKILL);
-	(void)waitpid(spawnedPid, NULL, 0);
+	RootHideJbctlTrace("FAILURE: isolated reboot-host launchd job did not produce a verified mmaintenanced child");
+	(void)exec_cmd_env(environment, launchctlPath, "remove", jobLabel, NULL);
 	return -1;
 }
 
@@ -236,12 +213,12 @@ static int RootHideRequestMaintenanceUserspaceReboot(void)
 	// jobs during RB2_USERREBOOT, so a bridge blocked inside that instance's
 	// reboot3 call can prevent launchd from reaching its self-spawn transition.
 	// Keep the lookup as evidence, but always use an isolated native child.
-	pid_t managedHostPid = RootHideFindMaintenanceRebootHost();
-	RootHideJbctlTrace("using isolated native mmaintenanced reboot host; managed_pid=%d",
+	pid_t managedHostPid = RootHideFindMaintenanceRebootHost(true);
+	RootHideJbctlTrace("using isolated launchd-submitted mmaintenanced reboot host; managed_pid=%d",
 	                   managedHostPid);
-	pid_t rebootHostPid = RootHideStartMaintenanceRebootHost();
+	pid_t rebootHostPid = RootHideSubmitMaintenanceRebootHost();
 	if (rebootHostPid <= 1) {
-		RootHideJbctlTrace("FAILURE: no isolated /usr/libexec/mmaintenanced reboot host is available");
+		RootHideJbctlTrace("FAILURE: no isolated launchd-submitted /usr/libexec/mmaintenanced reboot host is available");
 		return 72;
 	}
 
