@@ -179,8 +179,8 @@ static pid_t RootHideStartMaintenanceRebootHost(void)
 	short flags = 0;
 	posix_spawnattr_getflags(&attributes, &flags);
 	posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_START_SUSPENDED);
-	int uidResult = posix_spawnattr_setuid_np(&attributes, 501);
-	int gidResult = posix_spawnattr_setgid_np(&attributes, 501);
+	int uidResult = posix_spawnattr_set_uid_np(&attributes, 501);
+	int gidResult = posix_spawnattr_set_gid_np(&attributes, 501);
 	RootHideJbctlTrace("native mmaintenanced identity setup; uid_result=%d gid_result=%d uid=501 gid=501",
 	                   uidResult, gidResult);
 
