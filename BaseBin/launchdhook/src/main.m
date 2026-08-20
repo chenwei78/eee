@@ -202,7 +202,13 @@ __attribute__((constructor)) static void initializer(void)
 	roothide_trace("[launchd] phase complete: XPC hooks");
 	initDaemonHooks();
 	roothide_trace("[launchd] phase complete: daemon hooks");
-	initSpawnHooks();
+	bool deferSystemChildPatching = false;
+	if (firstLoad) {
+		if (__builtin_available(iOS 18.0, *)) {
+			deferSystemChildPatching = true;
+		}
+	}
+	initSpawnHooks(deferSystemChildPatching);
 	roothide_trace("[launchd] phase complete: spawn hooks");
 	initIPCHooks();
 	roothide_trace("[launchd] phase complete: IPC hooks");

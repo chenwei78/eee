@@ -32,6 +32,8 @@ void free_boot_logo(void);
 static int gSpawnHookInstallResult = KERN_FAILURE;
 static int gExecHookInstallResult = KERN_FAILURE;
 static bool gExecHookInstallAttempted = false;
+static bool gDeferSystemChildPatching = false;
+static volatile int gDeferredSystemChildTraceRemaining = 12;
 static volatile int gPostUserspaceRebootSpawnTraceRemaining = 0;
 static volatile int gPostUserspaceRebootSpawnTraceSequence = 0;
 
@@ -314,6 +316,21 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		}
 	}
 
+	// A live first injection attaches to an already-running launchd.  On iOS 18,
+	// modifying ordinary system jobs during the short interval before the first
+	// userspace reboot can leave those jobs unable to drain, which prevents
+	// launchd from ever reaching its own replacement spawn.  The self-spawn path
+	// above and the explicit BaseBin helper cases remain active; normal child
+	// patching resumes in the replacement launchd (DOPAMINE_INITIALIZED=1).
+	if (gDeferSystemChildPatching && getpid() == 1) {
+		if (gDeferredSystemChildTraceRemaining > 0) {
+			gDeferredSystemChildTraceRemaining--;
+			roothide_trace("[launchd] first-live-injection system child patching deferred; path=%s argv0=%s",
+			               path ? path : "(null)", argv && argv[0] ? argv[0] : "(null)");
+		}
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	}
+
 	return posix_spawn_hook_shared(pid, path, desc, argv, envp, __posix_spawn_orig_wrapper, systemwide_trust_file_by_path, platform_set_process_debugged, jbsetting(jetsamMultiplier));
 }
 
@@ -366,9 +383,11 @@ int exec_hook_ensure_installed(void)
 	return gExecHookInstallResult;
 }
 
-void initSpawnHooks(void)
+void initSpawnHooks(bool deferSystemChildPatching)
 {
+	gDeferSystemChildPatching = deferSystemChildPatching;
+	gDeferredSystemChildTraceRemaining = 12;
 	gSpawnHookInstallResult = litehook_hook_function(__posix_spawn, __posix_spawn_hook);
-	roothide_trace("[launchd] spawn hook installation returned %d; execve hook deferred until userspace-reboot preflight",
-	               gSpawnHookInstallResult);
+	roothide_trace("[launchd] spawn hook installation returned %d; defer_system_children=%d; execve hook deferred until userspace-reboot preflight",
+	               gSpawnHookInstallResult, gDeferSystemChildPatching);
 }
